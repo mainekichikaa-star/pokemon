@@ -3,6 +3,7 @@ import requests
 import re
 import time
 import random
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from statistics import median
@@ -60,9 +61,7 @@ def get_sheet():
         "https://www.googleapis.com/auth/drive"
     ]
 
-    service_account_info = dict(
-        st.secrets["gcp_service_account"]
-    )
+    service_account_info = dict(st.secrets["gcp_service_account"])
 
     if "private_key" in service_account_info:
         pk = service_account_info["private_key"]
@@ -99,17 +98,14 @@ def parse_title(full_title):
     rarity = ""
     name = ""
 
-    # パック名
     pack_match = re.search(r'\(([^)]+)\)$', full_title.strip())
     if pack_match:
         pack = pack_match.group(1)
 
-    # 型番
     bracket_match = re.search(r'\[([^\]]+)\]', full_title)
     if bracket_match:
         card_no = bracket_match.group(1)
 
-    # [ の前
     before_bracket = full_title.split("[")[0].strip()
 
     rarity_pattern = r'(.*?)\s+(' + '|'.join(RARITY_LIST) + r')$'
@@ -124,75 +120,68 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# PSA10価格取得
+# PSA10価格取得（グラフ解析版）
 # =========================================
 
 def get_psa10_price(product_url):
-    # すでに sales-histories が含まれている場合はそのまま、含まれていない場合は末尾を組み立てる
-    if "sales-histories" not in product_url:
-        sales_url = product_url.rstrip("/") + "/sales-histories?slide=right"
-    else:
-        sales_url = product_url
+    # 個別ページのURLの形を担保
+    base_url = product_url.split("/sales-histories")[0].split("?")[0]
 
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context(user_agent=SPOOFED_HEADERS["User-Agent"])
+            page = context.new_page()
             
-            # ボット判定を避けるためユーザーエージェントを設定
-            page.set_extra_http_headers(SPOOFED_HEADERS)
+            # 個別商品ページへ直接移動
+            page.goto(base_url, wait_until="load", timeout=60000)
+            
+            # 「PSA10」のラベル要素を探してクリック
+            psa10_label = page.locator("label:has-text('PSA10')")
+            if psa10_label.count() > 0:
+                psa10_label.first.click()
+                time.sleep(1.5)  # グラフのデータが切り替わるのを少し待つ
+            else:
+                browser.close()
+                return "なし"
 
-            page.goto(
-                sales_url,
-                wait_until="networkidle",
-                timeout=60000
-            )
-
-            html = page.content()
+            # Highchartsの内部オブジェクトから、現在表示されているグラフデータをJavaScriptで直接引っこ抜く
+            chart_data_json = page.evaluate("""
+                () => {
+                    const charts = window.Highcharts ? window.Highcharts.charts : [];
+                    const activeChart = charts.find(c => c && c.series && c.series.length > 0);
+                    if (activeChart) {
+                        // グラフにプロットされている点（売買履歴データ）を取り出す
+                        return activeChart.series[0].options.data.map(p => {
+                            // p が配列 [タイムスタンプ, 価格] か オブジェクト {x: , y: } かで分岐
+                            if (Array.isArray(p)) return p[1];
+                            if (p && typeof p === 'object') return p.y;
+                            return p;
+                        });
+                    }
+                    return null;
+                }
+            """)
+            
             browser.close()
 
-        soup = BeautifulSoup(html, "html.parser")
-        target_h2 = None
-
-        # 「状態PSA10の売買履歴」のH2タグを探す
-        for h2 in soup.select("h2.size-title"):
-            text = h2.get_text(strip=True)
-            if "PSA10" in text:
-                target_h2 = h2
-                break
-
-        if not target_h2:
+        if not chart_data_json:
             return "なし"
 
-        # 実際のHTML構造「ul.sales-history.item-list」に合わせて次の要素を検索
-        target_ul = target_h2.find_next("ul", class_=lambda x: x and "sales-history" in x)
-
-        if not target_ul:
+        # 有効な数値のみをフィルター（Noneなどを除去）し、直近データ（配列の末尾側）から最大6件取得
+        valid_prices = [int(p) for p in chart_data_json if p is not None and str(p).isdigit() or isinstance(p, (int, float))]
+        
+        if not valid_prices:
             return "なし"
 
-        prices = []
-        # 直近の売買履歴リスト（li.used）から価格を抽出
-        for li in target_ul.select("li.used"):
-            price_tag = li.select_one("p.price")
-            if not price_tag:
-                continue
+        # グラフデータは古い順 -> 新しい順に並んでいるため、末尾（直近）から6件を切り出す
+        recent_prices = valid_prices[-6:]
 
-            price_text = price_tag.get_text(strip=True)
-            price_num = int(re.sub(r"[^\d]", "", price_text))
-            prices.append(price_num)
-
-            # 直近6件のみ取得
-            if len(prices) >= 6:
-                break
-
-        if not prices:
-            return "なし"
-
-        # 中央値を計算して返す
-        return int(median(prices))
+        # 直近6件の中央値を計算して返す
+        return int(median(recent_prices))
 
     except Exception as e:
-        print(f"ERROR ({sales_url}):", e)
+        print(f"ERROR ({base_url}):", e)
         return "なし"
 
 # =========================================
@@ -205,7 +194,7 @@ st.set_page_config(
 )
 
 st.title("🃏 ポケカ価格自動反映ツール")
-st.write("PSA10直近6件中央値を取得")
+st.write("個別ページのPSA10グラフから直近6件の中央値を取得します")
 
 col1, col2 = st.columns(2)
 
@@ -278,9 +267,6 @@ if start_button:
 
         html = res.text
 
-        # =====================================
-        # 商品取得 regex
-        # =====================================
         product_regex = r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - '
         matches = re.findall(product_regex, html)
 
@@ -291,9 +277,6 @@ if start_button:
         now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
         new_rows = []
 
-        # =====================================
-        # 商品ループ
-        # =====================================
         for idx, match in enumerate(matches):
             if st.session_state.stop_flag:
                 st.warning("処理停止")
@@ -302,10 +285,8 @@ if start_button:
             href = match[0]
             full_title = match[1]
 
-            # クエリパラメータを削除したクリーンなパスを取得
             clean_path = href.split("?")[0]
 
-            # スニダンのURL構造の揺れを補正して個別ページのベースURLを作成
             if "/products/" in clean_path:
                 clean_path = clean_path.replace("/products/", "/apparels/")
             
@@ -316,17 +297,13 @@ if start_button:
             else:
                 product_url = clean_path
 
-            # 売買履歴ページのURLに整形
-            sales_history_url = product_url.rstrip("/") + "/sales-histories?slide=right"
-
             name, rarity, card_no, pack = parse_title(full_title)
-
-            log_area.text(f"[{idx+1}/{len(matches)}] {name}")
+            log_area.text(f"[{idx+1}/{len(matches)}] {name} (価格取得中...)")
 
             # =====================================
-            # PSA10価格取得
+            # PSA10価格取得（個別ページのグラフから抽出）
             # =====================================
-            psa_price = get_psa10_price(sales_history_url)
+            psa_price = get_psa10_price(product_url)
 
             key = f"{name}_{rarity}_{card_no}"
             row_data = [
@@ -349,9 +326,9 @@ if start_button:
                 new_rows.append(row_data)
 
             total_count += 1
-            time.sleep(random.uniform(1.0, 2.0))
+            # スニダンへの負荷軽減とBAN回避のためランダムにウェイトを入れる
+            time.sleep(random.uniform(1.5, 3.0))
 
-        # ページごとの新規行をまとめて追加
         if new_rows:
             sheet.append_rows(new_rows)
 
