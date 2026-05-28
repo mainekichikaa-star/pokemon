@@ -44,13 +44,6 @@ SPOOFED_HEADERS = {
 }
 
 # =========================================
-# 停止フラグ
-# =========================================
-
-if "stop_flag" not in st.session_state:
-    st.session_state.stop_flag = False
-
-# =========================================
 # Google Sheets
 # =========================================
 
@@ -59,81 +52,58 @@ def get_sheet():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-
     service_account_info = dict(st.secrets["gcp_service_account"])
-
     if "private_key" in service_account_info:
         pk = service_account_info["private_key"]
         if "\\n" in pk:
             pk = pk.replace("\\n", "\n")
         service_account_info["private_key"] = pk
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        service_account_info,
-        scope
-    )
-
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
-
     try:
         return workbook.worksheet(SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
-        sheet = workbook.add_worksheet(
-            title=SHEET_NAME,
-            rows="1000",
-            cols="20"
-        )
+        sheet = workbook.add_worksheet(title=SHEET_NAME, rows="1000", cols="20")
         sheet.append_row(HEADERS)
         return sheet
-
-# =========================================
-# タイトル解析
-# =========================================
 
 def parse_title(full_title):
     pack = ""
     card_no = ""
     rarity = ""
     name = ""
-
     pack_match = re.search(r'\(([^)]+)\)$', full_title.strip())
     if pack_match:
         pack = pack_match.group(1)
-
     bracket_match = re.search(r'\[([^\]]+)\]', full_title)
     if bracket_match:
         card_no = bracket_match.group(1)
-
     before_bracket = full_title.split("[")[0].strip()
-
     rarity_pattern = r'(.*?)\s+(' + '|'.join(RARITY_LIST) + r')$'
     rarity_match = re.search(rarity_pattern, before_bracket)
-
     if rarity_match:
         name = rarity_match.group(1).strip()
         rarity = rarity_match.group(2).strip()
     else:
         name = before_bracket
-
     return name, rarity, card_no, pack
 
 # =========================================
-# PSA10価格取得（鉄壁回避＆2重取得ロジック）
+# 【画面出力デバッグ版】PSA10価格取得
 # =========================================
 
-def get_psa10_price(product_url):
+def get_psa10_price_debug(product_url, debug_container):
     base_url = product_url.split("/sales-histories")[0].split("?")[0]
+    debug_container.info(f"🔍 解析対象URL: {base_url}")
 
     try:
         with sync_playwright() as p:
-            # 人間らしく見せるための起動オプション（ボット検知除外）
             browser = p.chromium.launch(
                 headless=True,
                 args=["--disable-blink-features=AutomationControlled"]
             )
-            
-            # 本物のブラウザのサイズと環境をシミュレート
             context = browser.new_context(
                 user_agent=SPOOFED_HEADERS["User-Agent"],
                 viewport={"width": 1280, "height": 800},
@@ -141,22 +111,33 @@ def get_psa10_price(product_url):
             )
             page = context.new_page()
             
-            # ページ読み込み完了まで最大60秒待機
+            # ページへ移動
             page.goto(base_url, wait_until="networkidle", timeout=60000)
-            time.sleep(1.5)
+            time.sleep(2.0)
 
-            # 「PSA10」のラジオボタン/ラベルを強めに探してクリック
+            # デバッグ用：アクセス直後の画面キャプチャをStreamlitに表示
+            img_bytes = page.screenshot()
+            debug_container.image(img_bytes, caption="【デバッグ】ページアクセス時の画面（ブロックされてないか確認）")
+
+            # 「PSA10」のボタンを探す
             psa10_label = page.locator("label:has-text('PSA10')")
-            if psa10_label.count() > 0:
+            label_count = psa10_label.count()
+            debug_container.write(f"📊 画面内の「PSA10」ボタン発見数: {label_count}")
+
+            if label_count > 0:
                 psa10_label.first.click()
-                time.sleep(2.0)  # 切り替わりを確実に待つ
+                debug_container.success("クリック成功、データ読み込みを待機中...")
+                time.sleep(3.0)  # グラフ変化を長めに待つ
+                
+                # クリック後の画面も確認
+                img_bytes_after = page.screenshot()
+                debug_container.image(img_bytes_after, caption="【デバッグ】PSA10クリック後の画面")
             else:
+                debug_container.error("❌ PSA10という文字の入ったボタン（ラベル）が見つかりません。")
                 browser.close()
                 return "なし"
 
-            # -----------------------------------------
-            # アプローチ1: Highcharts内部オブジェクトからのデータ抽出
-            # -----------------------------------------
+            # グラフ内部のJavaScriptデータを抽出
             chart_data = page.evaluate("""
                 () => {
                     const charts = window.Highcharts ? window.Highcharts.charts : [];
@@ -171,84 +152,58 @@ def get_psa10_price(product_url):
                     return null;
                 }
             """)
-
-            # -----------------------------------------
-            # アプローチ2: グラフ内のテキスト要素から直接数字を全スキャン（バックアップ）
-            # -----------------------------------------
+            
             html = page.content()
             browser.close()
 
-        # まずアプローチ1（JS抽出）の結果を検証
+        # JS抽出結果の確認
+        debug_container.write(f"📈 グラフから抽出された生の配列データ: {chart_data}")
+
         if chart_data:
-            valid_prices = [
-                int(p) for p in chart_data 
-                if p is not None and (str(p).isdigit() or isinstance(p, (int, float)))
-            ]
+            valid_prices = [int(p) for p in chart_data if p is not None and (str(p).isdigit() or isinstance(p, (int, float)))]
             if valid_prices:
                 recent_prices = valid_prices[-6:]
+                debug_container.write(f"💰 直近6件の価格: {recent_prices}")
                 return int(median(recent_prices))
 
-        # アプローチ1が空だった場合、アプローチ2（HTML内全検索）を発動
+        # バックアップ用：HTMLテキスト全検索
+        debug_container.warning("⚠️ グラフデータが空のため、HTMLのテキスト全スキャンを試みます。")
         soup = BeautifulSoup(html, "html.parser")
-        
-        # グラフを形成するSVG、または特定のテキストエリアに埋め込まれている「¥85,855」のような文字列を正規表現で探す
-        # 共有いただいた画像にあるツールチップ等に描画される数字を狙う
-        svg_text_elements = soup.find_all(text=True)
         raw_prices = []
-        
-        for text in svg_text_elements:
+        for text in soup.find_all(text=True):
             clean_text = text.strip()
-            # 「¥85,000」や「85,000」のような形式の文字列を検出
             if "¥" in clean_text or "," in clean_text:
                 num_str = re.sub(r"[^\d]", "", clean_text)
                 if num_str.isdigit() and len(num_str) >= 3:
-                    # 異常な数値（桁違い）を弾くための簡易フィルター（例: 500円以上、1000万円未満）
                     val = int(num_str)
                     if 500 < val < 10000000:
                         raw_prices.append(val)
 
+        debug_container.write(f"🔍 テキストから見つかった金額っぽい数字（上位15件）: {raw_prices[:15]}")
         if raw_prices:
-            # グラフ内部のテキストデータから取得した価格の直近（末尾側）6件
-            recent_prices = raw_prices[-6:]
-            return int(median(recent_prices))
+            return int(median(raw_prices[-6:]))
 
         return "なし"
 
     except Exception as e:
-        print(f"ERROR ({base_url}):", e)
+        debug_container.error(f"🚨 実行エラー発生: {str(e)}")
         return "なし"
 
 # =========================================
 # Streamlit UI
 # =========================================
 
-st.set_page_config(
-    page_title="ポケカ価格自動反映",
-    layout="wide"
-)
+st.set_page_config(page_title="ポケカ価格自動反映（デバッグ版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（1ページ限定検証モード）")
+st.write("1ページ目のみ処理を実行し、画面上にブラウザの動きとエラーの原因をリアルタイム表示します。")
 
-st.title("🃏 ポケカ価格自動反映ツール")
-st.write("個別ページのPSA10グラフから偽装を強化して価格を取得します")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    start_button = st.button("🔄 更新開始", type="primary")
-
-with col2:
-    stop_button = st.button("⛔ 停止")
-
-if stop_button:
-    st.session_state.stop_flag = True
-    st.warning("停止リクエスト受付")
+start_button = st.button("🔄 検証モードで更新開始", type="primary")
 
 # =========================================
 # 実行
 # =========================================
 
 if start_button:
-    st.session_state.stop_flag = False
-
     sheet = get_sheet()
     existing_rows = sheet.get_all_values()
     pokemon_map = {}
@@ -257,118 +212,83 @@ if start_button:
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 7:
                 row.append("")
-
             key = f"{row[0]}_{row[1]}_{row[2]}"
             pokemon_map[key] = {"row_num": idx}
 
     log_area = st.empty()
-    progress_bar = st.progress(0)
+    
+    # デバッグ情報を画面にまとめて出すための専用プレースホルダー
+    debug_container = st.container()
 
+    # ★1ページのみ実行
     current_page = 1
-    max_pages = 2
-    total_count = 0
+    log_area.markdown(f"## 📝 現在の処理: ページ {current_page} のみ")
 
-    session = requests.Session()
+    url = (
+        "https://snkrdunk.com/search?"
+        "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
+        "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
+        "%E3%82%AB%E3%83%BC%E3%83%89%29"
+        "&searchCategoryIds=6%2F33"
+        "&brandIds=pokemon"
+        "&sort=hottest"
+        f"&page={current_page}"
+    )
 
-    while current_page <= max_pages:
-        if st.session_state.stop_flag:
-            st.warning("処理停止")
-            st.stop()
+    try:
+        res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
+    except Exception as e:
+        st.error(f"一覧取得でのエラー: {e}")
+        st.stop()
 
-        progress_bar.progress(current_page / max_pages)
-        log_area.markdown(f"## ページ {current_page}")
+    if res.status_code != 200:
+        st.error(f"一覧取得失敗 ステータスコード: {res.status_code}")
+        st.stop()
 
-        url = (
-            "https://snkrdunk.com/search?"
-            "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
-            "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
-            "%E3%82%AB%E3%83%BC%E3%83%89%29"
-            "&searchCategoryIds=6%2F33"
-            "&brandIds=pokemon"
-            "&sort=hottest"
-            f"&page={current_page}"
-        )
+    matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
 
-        try:
-            res = session.get(url, headers=SPOOFED_HEADERS, timeout=20)
-        except Exception as e:
-            st.error(e)
+    if not matches:
+        st.warning("商品リンクが見つかりませんでした。")
+        st.stop()
+
+    now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
+    new_rows = []
+
+    # 最初の数件をテスト
+    for idx, match in enumerate(matches):
+        href = match[0]
+        full_title = match[1]
+
+        clean_path = href.split("?")[0].replace("/products/", "/apparels/").replace("/used", "")
+        product_url = clean_path if clean_path.startswith("http") else "https://snkrdunk.com" + clean_path
+
+        name, rarity, card_no, pack = parse_title(full_title)
+        
+        # 画面上の見出しを更新
+        log_area.markdown(f"### 🔄 現在処理中: **{name}** ({idx+1}/{len(matches)}件目)")
+        
+        # デバッグコンテナを都度クリアして現在のカードのログを表示
+        with debug_container:
+            st.markdown(f"---")
+            psa_price = get_psa10_price_debug(product_url, st)
+
+        key = f"{name}_{rarity}_{card_no}"
+        row_data = [name, rarity, card_no, pack, psa_price, now_str, product_url]
+
+        if key in pokemon_map:
+            row_num = pokemon_map[key]["row_num"]
+            sheet.update(f"A{row_num}:G{row_num}", [row_data])
+        else:
+            new_rows.append(row_data)
+
+        # 最初の3件だけで一度結果を見るためにストップをかける仕掛け（必要に応じて外してください）
+        if idx >= 2:
+            st.info("検証用に最初の3件で一旦止めています。")
             break
-
-        if res.status_code != 200:
-            st.error(f"一覧取得失敗 {res.status_code}")
-            break
-
-        html = res.text
-
-        product_regex = r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - '
-        matches = re.findall(product_regex, html)
-
-        if not matches:
-            st.warning("商品なし")
-            break
-
-        now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-        new_rows = []
-
-        for idx, match in enumerate(matches):
-            if st.session_state.stop_flag:
-                st.warning("処理停止")
-                st.stop()
-
-            href = match[0]
-            full_title = match[1]
-
-            clean_path = href.split("?")[0]
-
-            if "/products/" in clean_path:
-                clean_path = clean_path.replace("/products/", "/apparels/")
             
-            clean_path = clean_path.replace("/used", "")
+        time.sleep(3.0)
 
-            if not clean_path.startswith("http"):
-                product_url = "https://snkrdunk.com" + clean_path
-            else:
-                product_url = clean_path
+    if new_rows:
+        sheet.append_rows(new_rows)
 
-            name, rarity, card_no, pack = parse_title(full_title)
-            log_area.text(f"[{idx+1}/{len(matches)}] {name} (データ解析中...)")
-
-            # =====================================
-            # 価格取得
-            # =====================================
-            psa_price = get_psa10_price(product_url)
-
-            key = f"{name}_{rarity}_{card_no}"
-            row_data = [
-                name,
-                rarity,
-                card_no,
-                pack,
-                psa_price,
-                now_str,
-                product_url
-            ]
-
-            # =====================================
-            # スプレッドシート更新
-            # =====================================
-            if key in pokemon_map:
-                row_num = pokemon_map[key]["row_num"]
-                sheet.update(f"A{row_num}:G{row_num}", [row_data])
-            else:
-                new_rows.append(row_data)
-
-            total_count += 1
-            
-            # クローラー判定を避けるため、ウェイトを少し長めのランダム（2〜4秒）に変更
-            time.sleep(random.uniform(2.0, 4.0))
-
-        if new_rows:
-            sheet.append_rows(new_rows)
-
-        current_page += 1
-
-    progress_bar.progress(1.0)
-    st.success(f"完了 {total_count} 件")
-    st.balloons()
+    st.success("1ページ目のテスト処理が完了しました。")
