@@ -112,9 +112,8 @@ def parse_title(full_title):
 # =========================================
 
 def get_psa10_data_and_final_url(product_url):
-    """価格と、実際にページを開いたあとの最終遷移先URLを返す"""
     target_median = "なし"
-    final_url = product_url  # 失敗時のフォールバック用
+    final_url = product_url
 
     try:
         with sync_playwright() as p:
@@ -132,7 +131,6 @@ def get_psa10_data_and_final_url(product_url):
             page.goto(product_url, wait_until="networkidle", timeout=60000)
             time.sleep(1.5)
 
-            # 【重要】個別ページに入った時の実際のURLを取得
             final_url = page.url.split("/sales-histories")[0].split("?")[0]
 
             # Buyeeポップアップの消去処理
@@ -185,9 +183,9 @@ def get_psa10_data_and_final_url(product_url):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（実測URL取得版）", layout="wide")
+st.set_page_config(page_title="ポケカ価格自動反映（最新版）", layout="wide")
 st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・実測URL反映）")
-st.write("個別ページに進入した際の正確なURLを検知してスプレッドシートへ書き込みます。")
+st.write("パラメータ誤認バグを修正し、キャッシュによる行ズレを防止した完全版です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -215,8 +213,11 @@ if stop_button:
 if st.session_state.running:
     sheet = get_sheet()
     
-    st.info("📊 重複チェックのため、既存のGoogleシートをスキャン中...")
+    st.info("📊 最新データを取得するため、Googleシートをスキャン中...")
     existing_rows = sheet.get_all_values()
+    
+    # 現在のシート上のデータ件数を正確に把握
+    current_total_rows = len(existing_rows)
     pokemon_map = {}
 
     if existing_rows:
@@ -259,7 +260,6 @@ if st.session_state.running:
             st.session_state.running = False
             break
 
-        # 商品リンクとタイトルを取得
         matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
 
         if not matches:
@@ -280,8 +280,8 @@ if st.session_state.running:
             href = match[0]
             full_title = match[1]
 
-            # 予備のID抽出（最初にアクセスするためのURL組み立て用）
-            id_match = re.search(r'/(\d+)(?:\?|$)', href)
+            # 先頭直後の正しい5桁IDだけをピンポイント抽出（パラメータ誤認バグ修正）
+            id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
             if not id_match:
                 continue
             
@@ -298,30 +298,32 @@ if st.session_state.running:
             progress_bar.progress((idx + 1) / total_items)
             log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-            # 個別ページにアクセスして、「中央値価格」と「進入時の実際のURL」を同時に取得
+            # 個別ページの実測URLと価格を取得
             psa_price, real_product_url = get_psa10_data_and_final_url(access_url)
             
             now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-            # 取得した real_product_url をシートに格納します
             row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
 
-            # Googleスプレッドシート重複チェック
+            # Googleスプレッドシート重複・キャッシュチェック
             if run_key in pokemon_map:
                 row_num = pokemon_map[run_key]["row_num"]
                 sheet.update(f"A{row_num}:G{row_num}", [row_data])
                 st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price}")
             else:
+                # 新規追加データをリストに追加
                 new_rows.append(row_data)
                 st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
-                pokemon_map[run_key] = {"row_num": len(existing_rows) + len(new_rows) + 1}
+                
+                # 【キャッシュ位置ズレ対策】
+                # 今回のループ内で追加される新しい行番号を、現時点の総行数から計算して内部マップに即時追記
+                current_total_rows += 1
+                pokemon_map[run_key] = {"row_num": current_total_rows}
 
-            # 負荷軽減用ウェイト
             time.sleep(random.uniform(2.5, 4.0))
 
         # 新規取得カードの一括挿入
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
-            existing_rows.extend(new_rows)
 
         if st.session_state.running:
             current_page += 1
