@@ -50,7 +50,7 @@ if "stop_flag" not in st.session_state:
     st.session_state.stop_flag = False
 
 # =========================================
-# Google Sheets 接続
+# Google Sheets
 # =========================================
 
 def get_sheet():
@@ -85,6 +85,7 @@ def get_sheet():
     )
 
     try:
+
         return workbook.worksheet(
             SHEET_NAME
         )
@@ -97,7 +98,9 @@ def get_sheet():
             cols="20"
         )
 
-        sheet.append_row(HEADERS)
+        sheet.append_row(
+            HEADERS
+        )
 
         return sheet
 
@@ -150,6 +153,7 @@ def parse_title(full_title):
         rarity = rarity_match.group(2).strip()
 
     else:
+
         name = before_bracket
 
     return (
@@ -160,7 +164,7 @@ def parse_title(full_title):
     )
 
 # =========================================
-# PSA10 売買履歴取得
+# PSA10価格取得
 # =========================================
 
 def get_psa10_price(
@@ -171,86 +175,78 @@ def get_psa10_price(
     try:
 
         # =====================================
-        # 商品ページ
+        # 売買履歴URL
         # =====================================
-
-        res = session.get(
-            product_url,
-            headers=SPOOFED_HEADERS,
-            timeout=15
-        )
-
-        if res.status_code != 200:
-            return "なし"
-
-        soup = BeautifulSoup(
-            res.text,
-            "html.parser"
-        )
-
-        # =====================================
-        # 状態ごとの相場URL取得
-        # =====================================
-
-        sales_link = soup.select_one(
-            'a[href*="sales-histories"]'
-        )
-
-        if not sales_link:
-            return "なし"
-
-        href = sales_link.get("href")
-
-        if not href:
-            return "なし"
 
         sales_url = (
-            "https://snkrdunk.com"
-            + href
+            product_url.rstrip("/")
+            + "/sales-histories?slide=right"
         )
+
+        print("=" * 50)
+        print("ACCESS:", sales_url)
 
         # =====================================
         # 売買履歴ページ取得
         # =====================================
 
-        time.sleep(
-            random.uniform(1.0, 2.0)
-        )
-
-        sales_res = session.get(
+        res = session.get(
             sales_url,
             headers=SPOOFED_HEADERS,
-            timeout=15
+            timeout=20
         )
 
-        if sales_res.status_code != 200:
+        print("STATUS:", res.status_code)
+
+        if res.status_code != 200:
             return "なし"
 
-        sales_soup = BeautifulSoup(
-            sales_res.text,
+        html = res.text
+
+        # Cloudflare対策確認
+        if "Just a moment" in html:
+            print("Cloudflare Block")
+            return "なし"
+
+        soup = BeautifulSoup(
+            html,
             "html.parser"
         )
 
         # =====================================
-        # PSA10履歴ブロック取得
+        # PSA10 見出し取得
         # =====================================
 
         target_h2 = None
 
-        for h2 in sales_soup.select(
+        h2_list = soup.select(
             "h2.size-title"
-        ):
+        )
+
+        print("H2 COUNT:", len(h2_list))
+
+        for h2 in h2_list:
 
             text = h2.get_text(
                 strip=True
             )
 
+            print("H2:", text)
+
             if "PSA10" in text:
+
                 target_h2 = h2
                 break
 
         if not target_h2:
+
+            print("PSA10 H2 NOT FOUND")
+
             return "なし"
+
+        # =====================================
+        # 売買履歴 ul
+        # =====================================
 
         target_ul = target_h2.find_next(
             "ul",
@@ -258,6 +254,22 @@ def get_psa10_price(
         )
 
         if not target_ul:
+
+            print("TARGET UL NOT FOUND")
+
+            return "なし"
+
+        # =====================================
+        # li取得
+        # =====================================
+
+        items = target_ul.select(
+            "li.used"
+        )
+
+        print("ITEM COUNT:", len(items))
+
+        if not items:
             return "なし"
 
         # =====================================
@@ -265,10 +277,6 @@ def get_psa10_price(
         # =====================================
 
         psa_prices = []
-
-        items = target_ul.select(
-            "li.used"
-        )
 
         for item in items:
 
@@ -285,6 +293,9 @@ def get_psa10_price(
                 )
             )
 
+            print("PRICE:", price_text)
+
+            # 数字だけ抽出
             price_num = int(
                 re.sub(
                     r"[^\d]",
@@ -300,16 +311,22 @@ def get_psa10_price(
             if len(psa_prices) >= 6:
                 break
 
+        print("PSA PRICES:", psa_prices)
+
         if not psa_prices:
             return "なし"
 
-        return int(
+        result = int(
             median(psa_prices)
         )
 
+        print("MEDIAN:", result)
+
+        return result
+
     except Exception as e:
 
-        print(e)
+        print("ERROR:", e)
 
         return "なし"
 
@@ -350,11 +367,11 @@ if stop_button:
     st.session_state.stop_flag = True
 
     st.warning(
-        "停止リクエストを受け付けました"
+        "停止リクエスト受付"
     )
 
 # =========================================
-# メイン処理
+# 実行
 # =========================================
 
 if start_button:
@@ -404,7 +421,7 @@ if start_button:
         if st.session_state.stop_flag:
 
             st.warning(
-                "処理を停止しました"
+                "処理停止"
             )
 
             st.stop()
@@ -433,7 +450,7 @@ if start_button:
             res = session.get(
                 url,
                 headers=SPOOFED_HEADERS,
-                timeout=15
+                timeout=20
             )
 
         except Exception as e:
@@ -467,6 +484,8 @@ if start_button:
             html
         )
 
+        print("MATCHES:", len(matches))
+
         if not matches:
 
             st.warning(
@@ -475,13 +494,13 @@ if start_button:
 
             break
 
-        new_rows = []
-
         now_str = datetime.now(
             ZoneInfo("Asia/Tokyo")
         ).strftime(
             "%Y/%m/%d %H:%M:%S"
         )
+
+        new_rows = []
 
         # =====================================
         # 商品ループ
@@ -491,11 +510,10 @@ if start_button:
             matches
         ):
 
-            # 停止判定
             if st.session_state.stop_flag:
 
                 st.warning(
-                    "処理を停止しました"
+                    "処理停止"
                 )
 
                 st.stop()
@@ -527,6 +545,7 @@ if start_button:
                 )
 
             else:
+
                 product_url = clean_path
 
             (
@@ -543,6 +562,9 @@ if start_button:
                 f"{name}"
             )
 
+            print()
+            print("PRODUCT:", product_url)
+
             # =====================================
             # PSA10価格取得
             # =====================================
@@ -551,6 +573,8 @@ if start_button:
                 session,
                 product_url
             )
+
+            print("FINAL PRICE:", psa_price)
 
             key = (
                 f"{name}_"
@@ -594,7 +618,7 @@ if start_button:
             time.sleep(
                 random.uniform(
                     1.0,
-                    2.5
+                    2.0
                 )
             )
 
