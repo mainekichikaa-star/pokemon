@@ -108,7 +108,7 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格取得（広告削除＆PSA10抽出ロジック）
+# 価格取得（最近の売買履歴からPSA10を抽出）
 # =========================================
 
 def get_psa10_price_debug(product_url, debug_container):
@@ -131,90 +131,67 @@ def get_psa10_price_debug(product_url, debug_container):
             page.goto(base_url, wait_until="networkidle", timeout=60000)
             time.sleep(2.0)
 
-            # -----------------------------------------
-            # 【修正点】JavaScript内のコメントを修正（# から // へ）
-            # -----------------------------------------
+            # Buyeeポップアップの消去処理
             page.evaluate("""
                 () => {
-                    // 通常のDOMから×ボタンを強制クリックして消す
                     const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
                     if (closeBtn) { closeBtn.click(); return; }
                     
-                    // ポップアップの親要素ごと非表示(削除)にする
                     const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
                     if (modal) { modal.remove(); }
                 }
             """)
             time.sleep(1.0)
 
-            # 広告が消えた後の画面キャプチャを表示
-            img_bytes = page.screenshot()
-            debug_container.image(img_bytes, caption="【デバッグ】広告除去後のクリーンな画面")
-
-            # 「PSA10」のボタンを探してクリック
+            # 「PSA10」のボタンを強制クリック（状態を絞り込むため一応実行）
             psa10_label = page.locator("label:has-text('PSA10')")
-            label_count = psa10_label.count()
-            debug_container.write(f"📊 画面内の「PSA10」ボタン発見数: {label_count}")
-
-            if label_count > 0:
+            if psa10_label.count() > 0:
                 psa10_label.first.click(force=True)
-                debug_container.success("🎯 PSA10の選択に成功。データ更新待ち...")
-                time.sleep(3.0)
-                
-                # PSA10選択後の画面
-                img_bytes_after = page.screenshot()
-                debug_container.image(img_bytes_after, caption="【デバッグ】PSA10選択後の画面")
-            else:
-                debug_container.error("❌ PSA10ボタンが見つかりません。")
-                browser.close()
-                return "なし"
+                debug_container.success("🎯 PSA10の絞り込みボタンをクリックしました")
+                time.sleep(2.0)
 
-            # グラフ内部のJavaScript（Highcharts）データを抽出
-            chart_data = page.evaluate("""
-                () => {
-                    const charts = window.Highcharts ? window.Highcharts.charts : [];
-                    const activeChart = charts.find(c => c && c.series && c.series.length > 0);
-                    if (activeChart) {
-                        return activeChart.series[0].options.data.map(p => {
-                            if (Array.isArray(p)) return p[1];
-                            if (p && typeof p === 'object') return p.y;
-                            return p;
-                        });
-                    }
-                    return null;
-                }
-            """)
-            
+            # 最新のHTMLソースを取得してブラウザを閉じる
             html = page.content()
             browser.close()
 
-        debug_container.write(f"📈 グラフデータ抽出結果: {chart_data}")
-
-        if chart_data:
-            valid_prices = [int(p) for p in chart_data if p is not None and (str(p).isdigit() or isinstance(p, (int, float)))]
-            if valid_prices:
-                recent_prices = valid_prices[-6:]
-                debug_container.write(f"💰 直近6件の価格: {recent_prices}")
-                return int(median(recent_prices))
-
-        debug_container.warning("⚠️ グラフデータが直接読めないため、PSA10に絞り込まれたHTMLから数値を全検索します。")
+        # -----------------------------------------
+        # 【新ロジック】売買履歴リストから直接抽出
+        # -----------------------------------------
         soup = BeautifulSoup(html, "html.parser")
-        raw_prices = []
-        
-        for text in soup.find_all(text=True):
-            clean_text = text.strip()
-            if "¥" in clean_text or "," in clean_text:
-                num_str = re.sub(r"[^\d]", "", clean_text)
-                if num_str.isdigit() and len(num_str) >= 3:
-                    val = int(num_str)
-                    if 500 < val < 10000000:
-                        raw_prices.append(val)
+        psa10_prices = []
 
-        debug_container.write(f"🔍 検出された価格リスト: {raw_prices[:15]}")
-        if raw_prices:
-            return int(median(raw_prices[-6:]))
+        # 履歴の各行(li要素)をループ処理
+        history_items = soup.select("ul.sales-history.item-list li")
+        debug_container.write(f"📋 見つかった全体の売買履歴件数: {len(history_items)}件")
 
-        return "なし"
+        for item in history_items:
+            size_elem = item.select_one("p.size")
+            price_elem = item.select_one("p.price")
+
+            if size_elem and price_elem:
+                size_text = size_elem.get_text(strip=True)
+                price_text = price_elem.get_text(strip=True)
+
+                # 状態が「PSA10」のものだけを厳選して格納
+                if "PSA10" in size_text:
+                    # 「¥31,500」から数字だけを抽出して数値化
+                    clean_price = int(re.sub(r"[^\d]", "", price_text))
+                    psa10_prices.append(clean_price)
+
+        debug_container.write(f"💎 履歴から抽出したPSA10限定の価格リスト: {psa10_prices}")
+
+        # 直近6件（上から順に最新データなので、最初の6件）を対象にする
+        if psa10_prices:
+            recent_6_prices = psa10_prices[:6]
+            debug_container.info(f"⏱️ 直近のPSA10（最大6件）: {recent_6_prices}")
+            
+            # 中央値を計算して戻す
+            target_median = int(median(recent_6_prices))
+            debug_container.success(f"📈 算出された中央値: ¥{target_median:,}")
+            return target_median
+        else:
+            debug_container.warning("⚠️ 売買履歴からPSA10のデータが見つかりませんでした。")
+            return "なし"
 
     except Exception as e:
         debug_container.error(f"🚨 エラー詳細: {str(e)}")
@@ -224,9 +201,9 @@ def get_psa10_price_debug(product_url, debug_container):
 # Streamlit UI
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（広告除去版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（1ページ限定検証モード）")
-st.write("構文エラーを修正しました。Buyeeの被さり広告を排除してPSA10の価格を特定します。")
+st.set_page_config(page_title="ポケカ価格自動反映（履歴直接解析版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（履歴ダイレクト解析）")
+st.write("売買履歴HTMLから直接PSA10を検知し、直近6件の中央値を割り出します。")
 
 start_button = st.button("🔄 検証モードで更新開始", type="primary")
 
@@ -307,4 +284,4 @@ if start_button:
     if new_rows:
         sheet.append_rows(new_rows)
 
-    st.success("テスト処理完了！広告が消え、PSA10の価格データが取得できているか再度ご確認ください。")
+    st.success("テスト処理完了！正確なPSA10データが中央値として計算されているか、ログをご確認ください。")
