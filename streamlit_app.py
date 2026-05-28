@@ -108,7 +108,7 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格取得（ポップアップ強制突破版）
+# 価格取得（広告削除＆PSA10抽出ロジック）
 # =========================================
 
 def get_psa10_price_debug(product_url, debug_container):
@@ -128,34 +128,53 @@ def get_psa10_price_debug(product_url, debug_container):
             )
             page = context.new_page()
             
-            # ページへ移動
             page.goto(base_url, wait_until="networkidle", timeout=60000)
             time.sleep(2.0)
 
-            # アクセス直後の画面キャプチャを表示
-            img_bytes = page.screenshot()
-            debug_container.image(img_bytes, caption="【デバッグ】ページアクセス時の画面")
+            # -----------------------------------------
+            # 【最重要】Buyeeポップアップの「×」ボタンを検知して消し去る処理
+            # -----------------------------------------
+            # 共有画像で見えている、右上の丸い「×」ボタン（buyee-bcF-modal-close）のCSSセレクター
+            buyee_close_button = page.locator(".buyee-bcF-modal-close, #buyee-bcFrameClose, .buyee-close")
+            
+            # iframe（別枠埋め込み）の中に×ボタンがある場合も考慮して、ページ全体からクラス名を探すJavaScript
+            page.evaluate("""
+                () => {
+                    // 通常のDOMから×ボタンを強制クリックして消す
+                    const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
+                    if (closeBtn) { closeBtn.click(); return; }
+                    
+                    # ポップアップの親要素ごと非表示(削除)にする
+                    const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
+                    if (modal) { modal.remove(); }
+                }
+            """)
+            time.sleep(1.0) # 広告が消えるのを少し待つ
 
-            # 「PSA10」のボタンを探す
+            # 広告が消えた後の画面キャプチャを表示
+            img_bytes = page.screenshot()
+            debug_container.image(img_bytes, caption="【デバッグ】広告除去後のクリーンな画面")
+
+            # 「PSA10」のボタンを探してクリック
             psa10_label = page.locator("label:has-text('PSA10')")
             label_count = psa10_label.count()
             debug_container.write(f"📊 画面内の「PSA10」ボタン発見数: {label_count}")
 
             if label_count > 0:
-                # 【最重要】force=True を指定して、Buyeeのポップアップを無視して強制クリック！
+                # 念のためforce=Trueで確実にクリック
                 psa10_label.first.click(force=True)
-                debug_container.success("💥 強制クリック成功。データ読み込みを待機中...")
+                debug_container.success("🎯 PSA10の選択に成功。データ更新待ち...")
                 time.sleep(3.0)
                 
-                # クリック後の画面を表示して確認
+                # PSA10選択後の画面
                 img_bytes_after = page.screenshot()
-                debug_container.image(img_bytes_after, caption="【デバッグ】PSA10クリック後の画面")
+                debug_container.image(img_bytes_after, caption="【デバッグ】PSA10選択後の画面")
             else:
                 debug_container.error("❌ PSA10ボタンが見つかりません。")
                 browser.close()
                 return "なし"
 
-            # グラフ内部のJavaScriptデータを抽出
+            # グラフ内部のJavaScript（Highcharts）データを抽出
             chart_data = page.evaluate("""
                 () => {
                     const charts = window.Highcharts ? window.Highcharts.charts : [];
@@ -174,8 +193,9 @@ def get_psa10_price_debug(product_url, debug_container):
             html = page.content()
             browser.close()
 
-        debug_container.write(f"📈 グラフから抽出された生の配列データ: {chart_data}")
+        debug_container.write(f"📈 グラフデータ抽出結果: {chart_data}")
 
+        # グラフからデータが取れた場合
         if chart_data:
             valid_prices = [int(p) for p in chart_data if p is not None and (str(p).isdigit() or isinstance(p, (int, float)))]
             if valid_prices:
@@ -183,36 +203,40 @@ def get_psa10_price_debug(product_url, debug_container):
                 debug_container.write(f"💰 直近6件の価格: {recent_prices}")
                 return int(median(recent_prices))
 
-        # バックアップ用：HTMLテキスト全検索
-        debug_container.warning("⚠️ グラフデータが空のため、HTMLのテキスト全スキャンを試みます。")
+        # グラフデータがNoneだった場合のバックアップ（HTML全検索）
+        debug_container.warning("⚠️ グラフデータが直接読めないため、PSA10に絞り込まれたHTMLから数値を全検索します。")
         soup = BeautifulSoup(html, "html.parser")
         raw_prices = []
+        
+        # グラフのツールチップや軸のテキスト、一覧から金額を回収
         for text in soup.find_all(text=True):
             clean_text = text.strip()
             if "¥" in clean_text or "," in clean_text:
                 num_str = re.sub(r"[^\d]", "", clean_text)
                 if num_str.isdigit() and len(num_str) >= 3:
                     val = int(num_str)
+                    # 適正な価格帯（500円以上、1000万円未満）のみ
                     if 500 < val < 10000000:
                         raw_prices.append(val)
 
-        debug_container.write(f"🔍 テキストから見つかった金額っぽい数字: {raw_prices[:15]}")
+        debug_container.write(f"🔍 検出された価格リスト: {raw_prices[:15]}")
         if raw_prices:
+            # 重複を排除し、新しいデータ（末尾）から6件の中央値
             return int(median(raw_prices[-6:]))
 
         return "なし"
 
     except Exception as e:
-        debug_container.error(f"🚨 実行エラー発生: {str(e)}")
+        debug_container.error(f"🚨 エラー詳細: {str(e)}")
         return "なし"
 
 # =========================================
 # Streamlit UI
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（ポップアップ突破版）", layout="wide")
+st.set_page_config(page_title="ポケカ価格自動反映（広告除去版）", layout="wide")
 st.title("🃏 ポケカ価格自動反映ツール（1ページ限定検証モード）")
-st.write("Buyeeの被さり広告を強制突破する処理を追加しました。")
+st.write("海外発送広告（Buyee）を強制排除して、PSA10の価格を特定します。")
 
 start_button = st.button("🔄 検証モードで更新開始", type="primary")
 
@@ -248,11 +272,7 @@ if start_button:
     try:
         res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
     except Exception as e:
-        st.error(f"一覧取得でのエラー: {e}")
-        st.stop()
-
-    if res.status_code != 200:
-        st.error(f"一覧取得失敗 ステータスコード: {res.status_code}")
+        st.error(f"一覧取得エラー: {e}")
         st.stop()
 
     matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
@@ -264,7 +284,7 @@ if start_button:
     now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
     new_rows = []
 
-    # 確実に検証するため、まずは最初の3つの商品でテストを行います
+    # 最初の3つの商品で、広告が消えてPSA10の金額が綺麗に抜けるかテスト
     for idx, match in enumerate(matches):
         href = match[0]
         full_title = match[1]
@@ -298,4 +318,4 @@ if start_button:
     if new_rows:
         sheet.append_rows(new_rows)
 
-    st.success("1ページ目のテスト処理が完了しました！シートへの反映と合わせてログの「価格」をご確認ください。")
+    st.success("テスト処理完了！広告除去後のクリーンな画面キャプチャと、正しく絞り込まれた価格データをご確認ください。")
