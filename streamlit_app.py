@@ -3,7 +3,6 @@ import requests
 import re
 import time
 import random
-import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from statistics import median
@@ -120,40 +119,50 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# PSA10価格取得（グラフ解析版）
+# PSA10価格取得（鉄壁回避＆2重取得ロジック）
 # =========================================
 
 def get_psa10_price(product_url):
-    # 個別ページのURLの形を担保
     base_url = product_url.split("/sales-histories")[0].split("?")[0]
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=SPOOFED_HEADERS["User-Agent"])
+            # 人間らしく見せるための起動オプション（ボット検知除外）
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            
+            # 本物のブラウザのサイズと環境をシミュレート
+            context = browser.new_context(
+                user_agent=SPOOFED_HEADERS["User-Agent"],
+                viewport={"width": 1280, "height": 800},
+                locale="ja-JP"
+            )
             page = context.new_page()
             
-            # 個別商品ページへ直接移動
-            page.goto(base_url, wait_until="load", timeout=60000)
-            
-            # 「PSA10」のラベル要素を探してクリック
+            # ページ読み込み完了まで最大60秒待機
+            page.goto(base_url, wait_until="networkidle", timeout=60000)
+            time.sleep(1.5)
+
+            # 「PSA10」のラジオボタン/ラベルを強めに探してクリック
             psa10_label = page.locator("label:has-text('PSA10')")
             if psa10_label.count() > 0:
                 psa10_label.first.click()
-                time.sleep(1.5)  # グラフのデータが切り替わるのを少し待つ
+                time.sleep(2.0)  # 切り替わりを確実に待つ
             else:
                 browser.close()
                 return "なし"
 
-            # Highchartsの内部オブジェクトから、現在表示されているグラフデータをJavaScriptで直接引っこ抜く
-            chart_data_json = page.evaluate("""
+            # -----------------------------------------
+            # アプローチ1: Highcharts内部オブジェクトからのデータ抽出
+            # -----------------------------------------
+            chart_data = page.evaluate("""
                 () => {
                     const charts = window.Highcharts ? window.Highcharts.charts : [];
                     const activeChart = charts.find(c => c && c.series && c.series.length > 0);
                     if (activeChart) {
-                        // グラフにプロットされている点（売買履歴データ）を取り出す
                         return activeChart.series[0].options.data.map(p => {
-                            // p が配列 [タイムスタンプ, 価格] か オブジェクト {x: , y: } かで分岐
                             if (Array.isArray(p)) return p[1];
                             if (p && typeof p === 'object') return p.y;
                             return p;
@@ -162,23 +171,48 @@ def get_psa10_price(product_url):
                     return null;
                 }
             """)
-            
+
+            # -----------------------------------------
+            # アプローチ2: グラフ内のテキスト要素から直接数字を全スキャン（バックアップ）
+            # -----------------------------------------
+            html = page.content()
             browser.close()
 
-        if not chart_data_json:
-            return "なし"
+        # まずアプローチ1（JS抽出）の結果を検証
+        if chart_data:
+            valid_prices = [
+                int(p) for p in chart_data 
+                if p is not None and (str(p).isdigit() or isinstance(p, (int, float)))
+            ]
+            if valid_prices:
+                recent_prices = valid_prices[-6:]
+                return int(median(recent_prices))
 
-        # 有効な数値のみをフィルター（Noneなどを除去）し、直近データ（配列の末尾側）から最大6件取得
-        valid_prices = [int(p) for p in chart_data_json if p is not None and str(p).isdigit() or isinstance(p, (int, float))]
+        # アプローチ1が空だった場合、アプローチ2（HTML内全検索）を発動
+        soup = BeautifulSoup(html, "html.parser")
         
-        if not valid_prices:
-            return "なし"
+        # グラフを形成するSVG、または特定のテキストエリアに埋め込まれている「¥85,855」のような文字列を正規表現で探す
+        # 共有いただいた画像にあるツールチップ等に描画される数字を狙う
+        svg_text_elements = soup.find_all(text=True)
+        raw_prices = []
+        
+        for text in svg_text_elements:
+            clean_text = text.strip()
+            # 「¥85,000」や「85,000」のような形式の文字列を検出
+            if "¥" in clean_text or "," in clean_text:
+                num_str = re.sub(r"[^\d]", "", clean_text)
+                if num_str.isdigit() and len(num_str) >= 3:
+                    # 異常な数値（桁違い）を弾くための簡易フィルター（例: 500円以上、1000万円未満）
+                    val = int(num_str)
+                    if 500 < val < 10000000:
+                        raw_prices.append(val)
 
-        # グラフデータは古い順 -> 新しい順に並んでいるため、末尾（直近）から6件を切り出す
-        recent_prices = valid_prices[-6:]
+        if raw_prices:
+            # グラフ内部のテキストデータから取得した価格の直近（末尾側）6件
+            recent_prices = raw_prices[-6:]
+            return int(median(recent_prices))
 
-        # 直近6件の中央値を計算して返す
-        return int(median(recent_prices))
+        return "なし"
 
     except Exception as e:
         print(f"ERROR ({base_url}):", e)
@@ -194,7 +228,7 @@ st.set_page_config(
 )
 
 st.title("🃏 ポケカ価格自動反映ツール")
-st.write("個別ページのPSA10グラフから直近6件の中央値を取得します")
+st.write("個別ページのPSA10グラフから偽装を強化して価格を取得します")
 
 col1, col2 = st.columns(2)
 
@@ -298,10 +332,10 @@ if start_button:
                 product_url = clean_path
 
             name, rarity, card_no, pack = parse_title(full_title)
-            log_area.text(f"[{idx+1}/{len(matches)}] {name} (価格取得中...)")
+            log_area.text(f"[{idx+1}/{len(matches)}] {name} (データ解析中...)")
 
             # =====================================
-            # PSA10価格取得（個別ページのグラフから抽出）
+            # 価格取得
             # =====================================
             psa_price = get_psa10_price(product_url)
 
@@ -326,8 +360,9 @@ if start_button:
                 new_rows.append(row_data)
 
             total_count += 1
-            # スニダンへの負荷軽減とBAN回避のためランダムにウェイトを入れる
-            time.sleep(random.uniform(1.5, 3.0))
+            
+            # クローラー判定を避けるため、ウェイトを少し長めのランダム（2〜4秒）に変更
+            time.sleep(random.uniform(2.0, 4.0))
 
         if new_rows:
             sheet.append_rows(new_rows)
