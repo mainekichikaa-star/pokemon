@@ -151,7 +151,6 @@ def get_psa10_price(product_url, log_container):
             html = page.content()
             browser.close()
 
-        # 売買履歴リストから直接抽出
         soup = BeautifulSoup(html, "html.parser")
         psa10_prices = []
 
@@ -183,11 +182,10 @@ def get_psa10_price(product_url, log_container):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（完全版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（全ページ巡回・停止ボタン搭載）")
-st.write("Buyee広告を自動で排除し、売買履歴からPSA10の直近6件中央値を抽出してシートへ反映します。")
+st.set_page_config(page_title="ポケカ価格自動反映（無限巡回版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回）")
+st.write("実際のページネーションURL構造に完全適合させ、ひたすら全ページを走破します。")
 
-# ボタン状態の初期化
 if "running" not in st.session_state:
     st.session_state.running = False
 
@@ -204,18 +202,17 @@ if start_button:
 
 if stop_button:
     st.session_state.running = False
-    st.warning("🛑 停止要請を受け付けました。次のカードの処理が終わり次第終了します。")
+    st.warning("🛑 停止要協を受け付けました。現在のカードの同期完了後に安全に停止します...")
     st.rerun()
 
 # =========================================
-# メイン処理ループ
+# メイン巡回ループ
 # =========================================
 
 if st.session_state.running:
     sheet = get_sheet()
     
-    # 重複ガード用：現在スプレッドシートにあるデータをマップ化
-    st.info("📊 現在のGoogleシートのデータを読み込み中...")
+    st.info("📊 重複チェックのため、既存のGoogleシートをスキャン中...")
     existing_rows = sheet.get_all_values()
     pokemon_map = {}
 
@@ -223,7 +220,6 @@ if st.session_state.running:
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 7:
                 row.append("")
-            # 「名前_レアリティ_型番」を重複チェックのキーにする
             key = f"{row[0]}_{row[1]}_{row[2]}"
             pokemon_map[key] = {"row_num": idx}
 
@@ -231,35 +227,33 @@ if st.session_state.running:
     progress_bar = st.progress(0)
     
     current_page = 1
-    processed_in_this_run = set()  # 今回の実行中に処理したカードの重複防止用
+    processed_in_this_run = set()  # 今回のセッション内での多重重複防止
 
     while st.session_state.running:
         log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
         
+        # 【重要】ご提示いただいたHTMLの正規URL構造に完全一致させました
         url = (
-            "https://snkrdunk.com/search?"
-            "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
-            "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
-            "%E3%82%AB%E3%83%BC%E3%83%89%29"
-            "&searchCategoryIds=6%2F33"
-            "&brandIds=pokemon"
-            "&sort=hottest"
+            f"https://snkrdunk.com/search?"
+            f"keywords=%E3%83%88%E3%83%AC%E3%82%AB"
+            f"&searchCategoryIds=6%2F33"
+            f"&brandIds=pokemon"
             f"&page={current_page}"
         )
 
         try:
             res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
         except Exception as e:
-            st.error(f"❌ 一覧取得でエラーが発生しました(Page {current_page}): {e}")
+            st.error(f"❌ 一覧取得で通信エラーが発生しました(Page {current_page}): {e}")
             st.session_state.running = False
             break
 
         if res.status_code == 404:
-            st.success(f"🎉 全てのページ（最終ページ: {current_page-1}）の巡回が完了しました！")
+            st.success(f"🎉 最終ページに到達したため、全巡回を完了しました！（最終: {current_page-1}ページ）")
             st.session_state.running = False
             break
         elif res.status_code != 200:
-            st.error(f"❌ 一覧の取得に失敗しました。ステータスコード: {res.status_code}")
+            st.error(f"❌ ページの取得に失敗しました。Status: {res.status_code}")
             st.session_state.running = False
             break
 
@@ -267,7 +261,7 @@ if st.session_state.running:
         matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
 
         if not matches:
-            st.info(f"💡 ページ {current_page} に商品が見つからなかったため、ここで終了します。")
+            st.success(f"🎉 商品が見つからなくなったため、全ページの巡回を完了しました！（合計: {current_page-1}ページ走破）")
             st.session_state.running = False
             break
 
@@ -275,20 +269,19 @@ if st.session_state.running:
         total_items = len(matches)
 
         for idx, match in enumerate(matches):
-            # 途中で停止ボタンが押されたか毎ステップチェック
+            # ループのステップ毎に停止ボタンのフラグをチェック
             if not st.session_state.running:
                 break
 
             href = match[0]
             full_title = match[1]
 
-            # URLを正規化
             clean_path = href.split("?")[0].replace("/products/", "/apparels/").replace("/used", "")
             product_url = clean_path if clean_path.startswith("http") else "https://snkrdunk.com" + clean_path
 
             name, rarity, card_no, pack = parse_title(full_title)
             
-            # 今回のループですでに同じカードを処理していたらスキップ（同一ページ内の重複対策）
+            # 同一ページ内、または今回すでに処理したカードの重複上書き回数を減らすガード
             run_key = f"{name}_{rarity}_{card_no}"
             if run_key in processed_in_this_run:
                 continue
@@ -297,13 +290,13 @@ if st.session_state.running:
             progress_bar.progress((idx + 1) / total_items)
             log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-            # 個別ページの価格取得
+            # 個別ページの売買履歴からPSA10中央値を取得
             psa_price = get_psa10_price(product_url, st)
             
             now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
             row_data = [name, rarity, card_no, pack, psa_price, now_str, product_url]
 
-            # Googleシートへの反映（重複があれば上書き、なければ新規追加）
+            # Googleスプレッドシート重複チェック（あれば上書き、なければ新規）
             if run_key in pokemon_map:
                 row_num = pokemon_map[run_key]["row_num"]
                 sheet.update(f"A{row_num}:G{row_num}", [row_data])
@@ -311,22 +304,23 @@ if st.session_state.running:
             else:
                 new_rows.append(row_data)
                 st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
-                # 新しく追加したデータもその後の上書き対象にできるようにマップ登録
+                # 今回追加したものを配列ベースでマップに仮登録（この後の重複をさらに防ぐ）
                 pokemon_map[run_key] = {"row_num": len(existing_rows) + len(new_rows) + 1}
 
-            # サーバー負荷軽減のため適切なウェイト
+            # 相手方サーバーへの不可軽減のためランダムなウェイト
             time.sleep(random.uniform(2.5, 4.0))
 
-        # 新規追加のデータをページ毎に一括挿入
+        # 新規取得カードがあればページごとに一括挿入して書き込み速度を最適化
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
+            # 反映が済んだらexisting_rowsのトータル行数を同期
+            existing_rows.extend(new_rows)
 
-        # 次のページへ
         if st.session_state.running:
             current_page += 1
             time.sleep(2.0)
         else:
-            st.warning("🛑 処理が途中で安全に停止されました。")
+            st.warning("🛑 処理がユーザーにより停止されました。")
             break
 
     st.session_state.running = False
