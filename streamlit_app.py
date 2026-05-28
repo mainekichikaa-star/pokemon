@@ -11,9 +11,9 @@ from playwright.sync_api import sync_playwright
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# =========================================
+# ==================================================
 # 設定
-# =========================================
+# ==================================================
 
 SPREADSHEET_ID = "1HwNBcYJUSofFS-HkQI9eVLZWnuOJaXPzMmE8nC6E_bY"
 SHEET_NAME = "カード"
@@ -29,30 +29,44 @@ HEADERS = [
 ]
 
 RARITY_LIST = [
-    "SAR", "SR", "AR", "CHR", "CSR",
-    "UR", "HR", "RRR", "RR", "R",
-    "C", "U", "P", "PROMO", "MUR", "MA"
+    "SAR",
+    "SR",
+    "AR",
+    "CHR",
+    "CSR",
+    "UR",
+    "HR",
+    "RRR",
+    "RR",
+    "R",
+    "C",
+    "U",
+    "P",
+    "PROMO",
+    "MUR",
+    "MA"
 ]
 
-SPOOFED_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
-}
+SEARCH_URL = (
+    "https://snkrdunk.com/search?"
+    "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
+    "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
+    "%E3%82%AB%E3%83%BC%E3%83%89%29"
+    "&searchCategoryIds=6%2F33"
+    "&brandIds=pokemon"
+    "&sort=hottest"
+)
 
-# =========================================
-# 停止フラグ
-# =========================================
+# ==================================================
+# 停止ボタン用
+# ==================================================
 
 if "stop_flag" not in st.session_state:
     st.session_state.stop_flag = False
 
-# =========================================
-# Google Sheets
-# =========================================
+# ==================================================
+# スプレッドシート接続
+# ==================================================
 
 def get_sheet():
 
@@ -69,8 +83,7 @@ def get_sheet():
 
         pk = service_account_info["private_key"]
 
-        if "\\n" in pk:
-            pk = pk.replace("\\n", "\n")
+        pk = pk.replace("\\n", "\n")
 
         service_account_info["private_key"] = pk
 
@@ -105,9 +118,9 @@ def get_sheet():
 
         return sheet
 
-# =========================================
-# タイトル解析
-# =========================================
+# ==================================================
+# 商品名解析
+# ==================================================
 
 def parse_title(full_title):
 
@@ -118,7 +131,7 @@ def parse_title(full_title):
 
     # パック名
     pack_match = re.search(
-        r'\(([^)]+)\)$',
+        r"\(([^)]+)\)$",
         full_title.strip()
     )
 
@@ -126,21 +139,20 @@ def parse_title(full_title):
         pack = pack_match.group(1)
 
     # 型番
-    bracket_match = re.search(
-        r'\[([^\]]+)\]',
+    card_match = re.search(
+        r"\[([^\]]+)\]",
         full_title
     )
 
-    if bracket_match:
-        card_no = bracket_match.group(1)
+    if card_match:
+        card_no = card_match.group(1)
 
-    # [ の前
     before_bracket = full_title.split("[")[0].strip()
 
     rarity_pattern = (
-        r'(.*?)\s+('
-        + '|'.join(RARITY_LIST)
-        + r')$'
+        r"(.*?)\s+("
+        + "|".join(RARITY_LIST)
+        + r")$"
     )
 
     rarity_match = re.search(
@@ -164,9 +176,71 @@ def parse_title(full_title):
         pack
     )
 
-# =========================================
+# ==================================================
+# Playwright HTML取得
+# ==================================================
+
+def get_rendered_html(url):
+
+    try:
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            )
+
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 "
+                    "Safari/537.36"
+                ),
+                locale="ja-JP",
+                timezone_id="Asia/Tokyo",
+                viewport={
+                    "width": 1400,
+                    "height": 2000
+                }
+            )
+
+            page = context.new_page()
+
+            page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            })
+            """)
+
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=90000
+            )
+
+            page.wait_for_timeout(7000)
+
+            html = page.content()
+
+            browser.close()
+
+            return html
+
+    except Exception as e:
+
+        return str(e)
+
+# ==================================================
 # PSA10価格取得
-# =========================================
+# ==================================================
 
 def get_psa10_price(product_url):
 
@@ -175,111 +249,104 @@ def get_psa10_price(product_url):
         + "/sales-histories?slide=right"
     )
 
-    try:
+    html = get_rendered_html(
+        sales_url
+    )
 
-        with sync_playwright() as p:
+    # デバッグ確認用
+    # st.write(html[:5000])
 
-            browser = p.chromium.launch(
-                headless=True
-            )
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
 
-            page = browser.new_page()
+    # PSA10見出し
+    target_h2 = None
 
-            page.goto(
-                sales_url,
-                wait_until="networkidle",
-                timeout=60000
-            )
+    for h2 in soup.select(
+        "h2.size-title"
+    ):
 
-            html = page.content()
-
-            browser.close()
-
-        soup = BeautifulSoup(
-            html,
-            "html.parser"
+        text = h2.get_text(
+            strip=True
         )
 
-        target_h2 = None
+        if "PSA10" in text:
 
-        for h2 in soup.select(
-            "h2.size-title"
-        ):
+            target_h2 = h2
+            break
 
-            text = h2.get_text(
-                strip=True
-            )
-
-            if "PSA10" in text:
-
-                target_h2 = h2
-                break
-
-        if not target_h2:
-            return "なし"
-
-        target_ul = target_h2.find_next(
-            "ul",
-            class_="sales-history"
-        )
-
-        if not target_ul:
-            return "なし"
-
-        prices = []
-
-        for li in target_ul.select(
-            "li.used"
-        ):
-
-            price_tag = li.select_one(
-                "p.price"
-            )
-
-            if not price_tag:
-                continue
-
-            price_text = price_tag.get_text(
-                strip=True
-            )
-
-            price_num = int(
-                re.sub(
-                    r"[^\d]",
-                    "",
-                    price_text
-                )
-            )
-
-            prices.append(price_num)
-
-            if len(prices) >= 6:
-                break
-
-        if not prices:
-            return "なし"
-
-        return int(
-            median(prices)
-        )
-
-    except Exception as e:
-
-        print("ERROR:", e)
-
+    if not target_h2:
         return "なし"
 
-# =========================================
+    # その下のul取得
+    target_ul = target_h2.find_next(
+        "ul",
+        class_="sales-history"
+    )
+
+    if not target_ul:
+        return "なし"
+
+    prices = []
+
+    for li in target_ul.select(
+        "li.used"
+    ):
+
+        size_tag = li.select_one(
+            "p.size"
+        )
+
+        if not size_tag:
+            continue
+
+        if "PSA10" not in size_tag.get_text():
+            continue
+
+        price_tag = li.select_one(
+            "p.price"
+        )
+
+        if not price_tag:
+            continue
+
+        price_text = price_tag.get_text(
+            strip=True
+        )
+
+        price_num = int(
+            re.sub(
+                r"[^\d]",
+                "",
+                price_text
+            )
+        )
+
+        prices.append(price_num)
+
+        if len(prices) >= 6:
+            break
+
+    if not prices:
+        return "なし"
+
+    return int(
+        median(prices)
+    )
+
+# ==================================================
 # Streamlit UI
-# =========================================
+# ==================================================
 
 st.set_page_config(
-    page_title="ポケカ価格自動反映",
+    page_title="ポケカ価格取得",
     layout="wide"
 )
 
 st.title(
-    "🃏 ポケカ価格自動反映ツール"
+    "🃏 ポケカ価格自動反映"
 )
 
 st.write(
@@ -309,9 +376,9 @@ if stop_button:
         "停止リクエスト受付"
     )
 
-# =========================================
+# ==================================================
 # 実行
-# =========================================
+# ==================================================
 
 if start_button:
 
@@ -348,69 +415,33 @@ if start_button:
     progress_bar = st.progress(0)
 
     current_page = 1
-    max_pages = 2
+    max_pages = 5
 
     total_count = 0
-
-    session = requests.Session()
 
     while current_page <= max_pages:
 
         if st.session_state.stop_flag:
 
-            st.warning(
-                "処理停止"
-            )
-
+            st.warning("停止しました")
             st.stop()
 
         progress_bar.progress(
             current_page / max_pages
         )
 
+        page_url = (
+            SEARCH_URL
+            + f"&page={current_page}"
+        )
+
         log_area.markdown(
             f"## ページ {current_page}"
         )
 
-        url = (
-            "https://snkrdunk.com/search?"
-            "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
-            "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
-            "%E3%82%AB%E3%83%BC%E3%83%89%29"
-            "&searchCategoryIds=6%2F33"
-            "&brandIds=pokemon"
-            "&sort=hottest"
-            f"&page={current_page}"
+        html = get_rendered_html(
+            page_url
         )
-
-        try:
-
-            res = session.get(
-                url,
-                headers=SPOOFED_HEADERS,
-                timeout=20
-            )
-
-        except Exception as e:
-
-            st.error(e)
-
-            break
-
-        if res.status_code != 200:
-
-            st.error(
-                f"一覧取得失敗 "
-                f"{res.status_code}"
-            )
-
-            break
-
-        html = res.text
-
-        # =====================================
-        # 商品取得
-        # =====================================
 
         product_regex = (
             r'<a[^>]*href="([^"]+?)"'
@@ -425,10 +456,12 @@ if start_button:
         if not matches:
 
             st.warning(
-                "商品なし"
+                f"ページ {current_page} 商品なし"
             )
 
             break
+
+        new_rows = []
 
         now_str = datetime.now(
             ZoneInfo("Asia/Tokyo")
@@ -436,22 +469,11 @@ if start_button:
             "%Y/%m/%d %H:%M:%S"
         )
 
-        new_rows = []
-
-        # =====================================
-        # 商品ループ
-        # =====================================
-
-        for idx, match in enumerate(
-            matches
-        ):
+        for idx, match in enumerate(matches):
 
             if st.session_state.stop_flag:
 
-                st.warning(
-                    "処理停止"
-                )
-
+                st.warning("停止しました")
                 st.stop()
 
             href = match[0]
@@ -498,10 +520,6 @@ if start_button:
                 f"{name}"
             )
 
-            # =====================================
-            # PSA10価格取得
-            # =====================================
-
             psa_price = get_psa10_price(
                 product_url
             )
@@ -521,10 +539,6 @@ if start_button:
                 now_str,
                 product_url
             ]
-
-            # =====================================
-            # 更新
-            # =====================================
 
             if key in pokemon_map:
 
@@ -548,13 +562,9 @@ if start_button:
             time.sleep(
                 random.uniform(
                     1.0,
-                    2.0
+                    2.5
                 )
             )
-
-        # =====================================
-        # 新規追加
-        # =====================================
 
         if new_rows:
 
@@ -567,8 +577,7 @@ if start_button:
     progress_bar.progress(1.0)
 
     st.success(
-        f"完了 "
-        f"{total_count} 件"
+        f"完了 {total_count} 件"
     )
 
     st.balloons()
