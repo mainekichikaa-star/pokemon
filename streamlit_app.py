@@ -108,10 +108,14 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格取得（売買履歴解析ロジック）
+# 価格＆開いたページのURL取得ロジック
 # =========================================
 
-def get_psa10_price(product_url, log_container):
+def get_psa10_data_and_final_url(product_url):
+    """価格と、実際にページを開いたあとの最終遷移先URLを返す"""
+    target_median = "なし"
+    final_url = product_url  # 失敗時のフォールバック用
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -127,6 +131,9 @@ def get_psa10_price(product_url, log_container):
             
             page.goto(product_url, wait_until="networkidle", timeout=60000)
             time.sleep(1.5)
+
+            # 【重要】個別ページに入った時の実際のURLを取得
+            final_url = page.url.split("/sales-histories")[0].split("?")[0]
 
             # Buyeeポップアップの消去処理
             page.evaluate("""
@@ -151,7 +158,6 @@ def get_psa10_price(product_url, log_container):
 
         soup = BeautifulSoup(html, "html.parser")
         psa10_prices = []
-
         history_items = soup.select("ul.sales-history.item-list li")
 
         for item in history_items:
@@ -169,20 +175,19 @@ def get_psa10_price(product_url, log_container):
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
-            return target_median
-        else:
-            return "なし"
 
     except Exception as e:
-        return "なし"
+        pass
+
+    return target_median, final_url
 
 # =========================================
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（URL修正版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・URL修正版）")
-st.write("1ページ最大30件の制限をかけ、商品URLの崩れを完全に防いだ決定版です。")
+st.set_page_config(page_title="ポケカ価格自動反映（実測URL取得版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・実測URL反映）")
+st.write("個別ページに進入した際の正確なURLを検知してスプレッドシートへ書き込みます。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -225,7 +230,7 @@ if st.session_state.running:
     progress_bar = st.progress(0)
     
     current_page = 1
-    processed_in_this_run = set()  # 今回のセッション内での多重重複防止
+    processed_in_this_run = set()
 
     while st.session_state.running:
         log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
@@ -262,7 +267,7 @@ if st.session_state.running:
             st.session_state.running = False
             break
 
-        # 【重要】1ページ最大30商品なので、ページネーションの巻き込みを防ぐため最初の30件のみに制限
+        # 1ページ最大30商品制限
         matches = matches[:30]
 
         new_rows = []
@@ -275,18 +280,16 @@ if st.session_state.running:
             href = match[0]
             full_title = match[1]
 
-            # 【重要】複雑な置換はせず、URLの末尾から「数字（ID）」だけを引っこ抜く
+            # 予備のID抽出（最初にアクセスするためのURL組み立て用）
             id_match = re.search(r'/(\d+)(?:\?|$)', href)
             if not id_match:
-                continue  # 数字が含まれない不正なリンクはスキップ
+                continue
             
             card_id = id_match.group(1)
-            # ご提示いただいた正しいURL（新品・中古共通の通常URL）に完全固定して再構築
-            product_url = f"https://snkrdunk.com/apparels/{card_id}"
+            access_url = f"https://snkrdunk.com/apparels/{card_id}"
 
             name, rarity, card_no, pack = parse_title(full_title)
             
-            # 同一ページ内、または今回すでに処理したカードの重複上書き回数を減らすガード
             run_key = f"{name}_{rarity}_{card_no}"
             if run_key in processed_in_this_run:
                 continue
@@ -295,13 +298,14 @@ if st.session_state.running:
             progress_bar.progress((idx + 1) / total_items)
             log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-            # 個別ページの売買履歴からPSA10中央値を取得
-            psa_price = get_psa10_price(product_url, st)
+            # 個別ページにアクセスして、「中央値価格」と「進入時の実際のURL」を同時に取得
+            psa_price, real_product_url = get_psa10_data_and_final_url(access_url)
             
             now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-            row_data = [name, rarity, card_no, pack, psa_price, now_str, product_url]
+            # 取得した real_product_url をシートに格納します
+            row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
 
-            # Googleスプレッドシート重複チェック（あれば上書き、なければ新規）
+            # Googleスプレッドシート重複チェック
             if run_key in pokemon_map:
                 row_num = pokemon_map[run_key]["row_num"]
                 sheet.update(f"A{row_num}:G{row_num}", [row_data])
@@ -311,10 +315,10 @@ if st.session_state.running:
                 st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
                 pokemon_map[run_key] = {"row_num": len(existing_rows) + len(new_rows) + 1}
 
-            # 相手方サーバーへの負荷軽減のため適切なウェイト
+            # 負荷軽減用ウェイト
             time.sleep(random.uniform(2.5, 4.0))
 
-        # 新規取得カードがあればページごとに一括挿入
+        # 新規取得カードの一括挿入
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
             existing_rows.extend(new_rows)
