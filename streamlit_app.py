@@ -108,12 +108,11 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格取得（最近の売買履歴からPSA10を抽出）
+# 価格取得（売買履歴解析ロジック）
 # =========================================
 
-def get_psa10_price_debug(product_url, debug_container):
+def get_psa10_price(product_url, log_container):
     base_url = product_url.split("/sales-histories")[0].split("?")[0]
-    debug_container.info(f"🔍 解析対象URL: {base_url}")
 
     try:
         with sync_playwright() as p:
@@ -129,7 +128,7 @@ def get_psa10_price_debug(product_url, debug_container):
             page = context.new_page()
             
             page.goto(base_url, wait_until="networkidle", timeout=60000)
-            time.sleep(2.0)
+            time.sleep(1.5)
 
             # Buyeeポップアップの消去処理
             page.evaluate("""
@@ -141,28 +140,22 @@ def get_psa10_price_debug(product_url, debug_container):
                     if (modal) { modal.remove(); }
                 }
             """)
-            time.sleep(1.0)
+            time.sleep(0.5)
 
-            # 「PSA10」のボタンを強制クリック（状態を絞り込むため一応実行）
+            # 「PSA10」のボタンを強制クリック
             psa10_label = page.locator("label:has-text('PSA10')")
             if psa10_label.count() > 0:
                 psa10_label.first.click(force=True)
-                debug_container.success("🎯 PSA10の絞り込みボタンをクリックしました")
-                time.sleep(2.0)
+                time.sleep(1.5)
 
-            # 最新のHTMLソースを取得してブラウザを閉じる
             html = page.content()
             browser.close()
 
-        # -----------------------------------------
-        # 【新ロジック】売買履歴リストから直接抽出
-        # -----------------------------------------
+        # 売買履歴リストから直接抽出
         soup = BeautifulSoup(html, "html.parser")
         psa10_prices = []
 
-        # 履歴の各行(li要素)をループ処理
         history_items = soup.select("ul.sales-history.item-list li")
-        debug_container.write(f"📋 見つかった全体の売買履歴件数: {len(history_items)}件")
 
         for item in history_items:
             size_elem = item.select_one("p.size")
@@ -172,43 +165,57 @@ def get_psa10_price_debug(product_url, debug_container):
                 size_text = size_elem.get_text(strip=True)
                 price_text = price_elem.get_text(strip=True)
 
-                # 状態が「PSA10」のものだけを厳選して格納
                 if "PSA10" in size_text:
-                    # 「¥31,500」から数字だけを抽出して数値化
                     clean_price = int(re.sub(r"[^\d]", "", price_text))
                     psa10_prices.append(clean_price)
 
-        debug_container.write(f"💎 履歴から抽出したPSA10限定の価格リスト: {psa10_prices}")
-
-        # 直近6件（上から順に最新データなので、最初の6件）を対象にする
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
-            debug_container.info(f"⏱️ 直近のPSA10（最大6件）: {recent_6_prices}")
-            
-            # 中央値を計算して戻す
             target_median = int(median(recent_6_prices))
-            debug_container.success(f"📈 算出された中央値: ¥{target_median:,}")
             return target_median
         else:
-            debug_container.warning("⚠️ 売買履歴からPSA10のデータが見つかりませんでした。")
             return "なし"
 
     except Exception as e:
-        debug_container.error(f"🚨 エラー詳細: {str(e)}")
         return "なし"
 
 # =========================================
-# Streamlit UI
+# Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（履歴直接解析版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（履歴ダイレクト解析）")
-st.write("売買履歴HTMLから直接PSA10を検知し、直近6件の中央値を割り出します。")
+st.set_page_config(page_title="ポケカ価格自動反映（完全版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（全ページ巡回・停止ボタン搭載）")
+st.write("Buyee広告を自動で排除し、売買履歴からPSA10の直近6件中央値を抽出してシートへ反映します。")
 
-start_button = st.button("🔄 検証モードで更新開始", type="primary")
+# ボタン状態の初期化
+if "running" not in st.session_state:
+    st.session_state.running = False
+
+col1, col2 = st.columns(2)
+
+with col1:
+    start_button = st.button("🔄 全ページ更新を開始", type="primary", disabled=st.session_state.running)
+with col2:
+    stop_button = st.button("🛑 処理を停止する", type="secondary", disabled=not st.session_state.running)
 
 if start_button:
+    st.session_state.running = True
+    st.rerun()
+
+if stop_button:
+    st.session_state.running = False
+    st.warning("🛑 停止要請を受け付けました。次のカードの処理が終わり次第終了します。")
+    st.rerun()
+
+# =========================================
+# メイン処理ループ
+# =========================================
+
+if st.session_state.running:
     sheet = get_sheet()
+    
+    # 重複ガード用：現在スプレッドシートにあるデータをマップ化
+    st.info("📊 現在のGoogleシートのデータを読み込み中...")
     existing_rows = sheet.get_all_values()
     pokemon_map = {}
 
@@ -216,72 +223,111 @@ if start_button:
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 7:
                 row.append("")
+            # 「名前_レアリティ_型番」を重複チェックのキーにする
             key = f"{row[0]}_{row[1]}_{row[2]}"
             pokemon_map[key] = {"row_num": idx}
 
     log_area = st.empty()
-    debug_container = st.container()
-
+    progress_bar = st.progress(0)
+    
     current_page = 1
-    log_area.markdown(f"## 📝 現在の処理: ページ {current_page} のみ")
+    processed_in_this_run = set()  # 今回の実行中に処理したカードの重複防止用
 
-    url = (
-        "https://snkrdunk.com/search?"
-        "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
-        "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
-        "%E3%82%AB%E3%83%BC%E3%83%89%29"
-        "&searchCategoryIds=6%2F33"
-        "&brandIds=pokemon"
-        "&sort=hottest"
-        f"&page={current_page}"
-    )
-
-    try:
-        res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
-    except Exception as e:
-        st.error(f"一覧取得エラー: {e}")
-        st.stop()
-
-    matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
-
-    if not matches:
-        st.warning("商品リンクが見つかりませんでした。")
-        st.stop()
-
-    now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-    new_rows = []
-
-    for idx, match in enumerate(matches):
-        href = match[0]
-        full_title = match[1]
-
-        clean_path = href.split("?")[0].replace("/products/", "/apparels/").replace("/used", "")
-        product_url = clean_path if clean_path.startswith("http") else "https://snkrdunk.com" + clean_path
-
-        name, rarity, card_no, pack = parse_title(full_title)
+    while st.session_state.running:
+        log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
         
-        log_area.markdown(f"### 🔄 現在処理中: **{name}** ({idx+1}/{len(matches)}件目)")
-        
-        with debug_container:
-            st.markdown(f"---")
-            psa_price = get_psa10_price_debug(product_url, st)
+        url = (
+            "https://snkrdunk.com/search?"
+            "keywords=%E3%83%88%E3%83%AC%E3%82%AB+"
+            "%28%E3%82%B7%E3%83%B3%E3%82%B0%E3%83%AB"
+            "%E3%82%AB%E3%83%BC%E3%83%89%29"
+            "&searchCategoryIds=6%2F33"
+            "&brandIds=pokemon"
+            "&sort=hottest"
+            f"&page={current_page}"
+        )
 
-        key = f"{name}_{rarity}_{card_no}"
-        row_data = [name, rarity, card_no, pack, psa_price, now_str, product_url]
-
-        if key in pokemon_map:
-            row_num = pokemon_map[key]["row_num"]
-            sheet.update(f"A{row_num}:G{row_num}", [row_data])
-        else:
-            new_rows.append(row_data)
-
-        if idx >= 2:
-            st.info("検証用に最初の3件で一旦止めています。")
+        try:
+            res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
+        except Exception as e:
+            st.error(f"❌ 一覧取得でエラーが発生しました(Page {current_page}): {e}")
+            st.session_state.running = False
             break
+
+        if res.status_code == 404:
+            st.success(f"🎉 全てのページ（最終ページ: {current_page-1}）の巡回が完了しました！")
+            st.session_state.running = False
+            break
+        elif res.status_code != 200:
+            st.error(f"❌ 一覧の取得に失敗しました。ステータスコード: {res.status_code}")
+            st.session_state.running = False
+            break
+
+        # 商品リンクとタイトルを取得
+        matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
+
+        if not matches:
+            st.info(f"💡 ページ {current_page} に商品が見つからなかったため、ここで終了します。")
+            st.session_state.running = False
+            break
+
+        new_rows = []
+        total_items = len(matches)
+
+        for idx, match in enumerate(matches):
+            # 途中で停止ボタンが押されたか毎ステップチェック
+            if not st.session_state.running:
+                break
+
+            href = match[0]
+            full_title = match[1]
+
+            # URLを正規化
+            clean_path = href.split("?")[0].replace("/products/", "/apparels/").replace("/used", "")
+            product_url = clean_path if clean_path.startswith("http") else "https://snkrdunk.com" + clean_path
+
+            name, rarity, card_no, pack = parse_title(full_title)
             
-        time.sleep(3.0)
+            # 今回のループですでに同じカードを処理していたらスキップ（同一ページ内の重複対策）
+            run_key = f"{name}_{rarity}_{card_no}"
+            if run_key in processed_in_this_run:
+                continue
+            processed_in_this_run.add(run_key)
 
-    if new_rows:
-        sheet.append_rows(new_rows)
+            progress_bar.progress((idx + 1) / total_items)
+            log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-    st.success("テスト処理完了！正確なPSA10データが中央値として計算されているか、ログをご確認ください。")
+            # 個別ページの価格取得
+            psa_price = get_psa10_price(product_url, st)
+            
+            now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
+            row_data = [name, rarity, card_no, pack, psa_price, now_str, product_url]
+
+            # Googleシートへの反映（重複があれば上書き、なければ新規追加）
+            if run_key in pokemon_map:
+                row_num = pokemon_map[run_key]["row_num"]
+                sheet.update(f"A{row_num}:G{row_num}", [row_data])
+                st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price}")
+            else:
+                new_rows.append(row_data)
+                st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
+                # 新しく追加したデータもその後の上書き対象にできるようにマップ登録
+                pokemon_map[run_key] = {"row_num": len(existing_rows) + len(new_rows) + 1}
+
+            # サーバー負荷軽減のため適切なウェイト
+            time.sleep(random.uniform(2.5, 4.0))
+
+        # 新規追加のデータをページ毎に一括挿入
+        if new_rows and st.session_state.running:
+            sheet.append_rows(new_rows)
+
+        # 次のページへ
+        if st.session_state.running:
+            current_page += 1
+            time.sleep(2.0)
+        else:
+            st.warning("🛑 処理が途中で安全に停止されました。")
+            break
+
+    st.session_state.running = False
+    st.rerun()
