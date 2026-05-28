@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from statistics import median
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -167,71 +168,47 @@ def parse_title(full_title):
 # PSA10価格取得
 # =========================================
 
-def get_psa10_price(
-    session,
-    product_url
-):
+def get_psa10_price(product_url):
+
+    sales_url = (
+        product_url.rstrip("/")
+        + "/sales-histories?slide=right"
+    )
 
     try:
 
-        # =====================================
-        # 売買履歴URL
-        # =====================================
+        with sync_playwright() as p:
 
-        sales_url = (
-            product_url.rstrip("/")
-            + "/sales-histories?slide=right"
-        )
+            browser = p.chromium.launch(
+                headless=True
+            )
 
-        print("=" * 50)
-        print("ACCESS:", sales_url)
+            page = browser.new_page()
 
-        # =====================================
-        # 売買履歴ページ取得
-        # =====================================
+            page.goto(
+                sales_url,
+                wait_until="networkidle",
+                timeout=60000
+            )
 
-        res = session.get(
-            sales_url,
-            headers=SPOOFED_HEADERS,
-            timeout=20
-        )
+            html = page.content()
 
-        print("STATUS:", res.status_code)
-
-        if res.status_code != 200:
-            return "なし"
-
-        html = res.text
-
-        # Cloudflare対策確認
-        if "Just a moment" in html:
-            print("Cloudflare Block")
-            return "なし"
+            browser.close()
 
         soup = BeautifulSoup(
             html,
             "html.parser"
         )
 
-        # =====================================
-        # PSA10 見出し取得
-        # =====================================
-
         target_h2 = None
 
-        h2_list = soup.select(
+        for h2 in soup.select(
             "h2.size-title"
-        )
-
-        print("H2 COUNT:", len(h2_list))
-
-        for h2 in h2_list:
+        ):
 
             text = h2.get_text(
                 strip=True
             )
-
-            print("H2:", text)
 
             if "PSA10" in text:
 
@@ -239,14 +216,7 @@ def get_psa10_price(
                 break
 
         if not target_h2:
-
-            print("PSA10 H2 NOT FOUND")
-
             return "なし"
-
-        # =====================================
-        # 売買履歴 ul
-        # =====================================
 
         target_ul = target_h2.find_next(
             "ul",
@@ -254,48 +224,25 @@ def get_psa10_price(
         )
 
         if not target_ul:
-
-            print("TARGET UL NOT FOUND")
-
             return "なし"
 
-        # =====================================
-        # li取得
-        # =====================================
+        prices = []
 
-        items = target_ul.select(
+        for li in target_ul.select(
             "li.used"
-        )
+        ):
 
-        print("ITEM COUNT:", len(items))
-
-        if not items:
-            return "なし"
-
-        # =====================================
-        # 直近6件
-        # =====================================
-
-        psa_prices = []
-
-        for item in items:
-
-            price_tag = item.select_one(
+            price_tag = li.select_one(
                 "p.price"
             )
 
             if not price_tag:
                 continue
 
-            price_text = (
-                price_tag.get_text(
-                    strip=True
-                )
+            price_text = price_tag.get_text(
+                strip=True
             )
 
-            print("PRICE:", price_text)
-
-            # 数字だけ抽出
             price_num = int(
                 re.sub(
                     r"[^\d]",
@@ -304,25 +251,17 @@ def get_psa10_price(
                 )
             )
 
-            psa_prices.append(
-                price_num
-            )
+            prices.append(price_num)
 
-            if len(psa_prices) >= 6:
+            if len(prices) >= 6:
                 break
 
-        print("PSA PRICES:", psa_prices)
-
-        if not psa_prices:
+        if not prices:
             return "なし"
 
-        result = int(
-            median(psa_prices)
+        return int(
+            median(prices)
         )
-
-        print("MEDIAN:", result)
-
-        return result
 
     except Exception as e:
 
@@ -408,16 +347,15 @@ if start_button:
 
     progress_bar = st.progress(0)
 
-    session = requests.Session()
-
     current_page = 1
     max_pages = 2
 
     total_count = 0
 
+    session = requests.Session()
+
     while current_page <= max_pages:
 
-        # 停止判定
         if st.session_state.stop_flag:
 
             st.warning(
@@ -483,8 +421,6 @@ if start_button:
             product_regex,
             html
         )
-
-        print("MATCHES:", len(matches))
 
         if not matches:
 
@@ -562,19 +498,13 @@ if start_button:
                 f"{name}"
             )
 
-            print()
-            print("PRODUCT:", product_url)
-
             # =====================================
             # PSA10価格取得
             # =====================================
 
             psa_price = get_psa10_price(
-                session,
                 product_url
             )
-
-            print("FINAL PRICE:", psa_price)
 
             key = (
                 f"{name}_"
