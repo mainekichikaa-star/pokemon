@@ -112,8 +112,6 @@ def parse_title(full_title):
 # =========================================
 
 def get_psa10_price(product_url, log_container):
-    base_url = product_url.split("/sales-histories")[0].split("?")[0]
-
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -127,7 +125,7 @@ def get_psa10_price(product_url, log_container):
             )
             page = context.new_page()
             
-            page.goto(base_url, wait_until="networkidle", timeout=60000)
+            page.goto(product_url, wait_until="networkidle", timeout=60000)
             time.sleep(1.5)
 
             # Buyeeポップアップの消去処理
@@ -182,9 +180,9 @@ def get_psa10_price(product_url, log_container):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（無限巡回版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回）")
-st.write("実際のページネーションURL構造に完全適合させ、ひたすら全ページを走破します。")
+st.set_page_config(page_title="ポケカ価格自動反映（URL修正版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・URL修正版）")
+st.write("1ページ最大30件の制限をかけ、商品URLの崩れを完全に防いだ決定版です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -202,7 +200,7 @@ if start_button:
 
 if stop_button:
     st.session_state.running = False
-    st.warning("🛑 停止要協を受け付けました。現在のカードの同期完了後に安全に停止します...")
+    st.warning("🛑 停止要請を受け付けました。現在のカードの同期完了後に安全に停止します...")
     st.rerun()
 
 # =========================================
@@ -232,7 +230,6 @@ if st.session_state.running:
     while st.session_state.running:
         log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
         
-        # 【重要】ご提示いただいたHTMLの正規URL構造に完全一致させました
         url = (
             f"https://snkrdunk.com/search?"
             f"keywords=%E3%83%88%E3%83%AC%E3%82%AB"
@@ -265,19 +262,27 @@ if st.session_state.running:
             st.session_state.running = False
             break
 
+        # 【重要】1ページ最大30商品なので、ページネーションの巻き込みを防ぐため最初の30件のみに制限
+        matches = matches[:30]
+
         new_rows = []
         total_items = len(matches)
 
         for idx, match in enumerate(matches):
-            # ループのステップ毎に停止ボタンのフラグをチェック
             if not st.session_state.running:
                 break
 
             href = match[0]
             full_title = match[1]
 
-            clean_path = href.split("?")[0].replace("/products/", "/apparels/").replace("/used", "")
-            product_url = clean_path if clean_path.startswith("http") else "https://snkrdunk.com" + clean_path
+            # 【重要】複雑な置換はせず、URLの末尾から「数字（ID）」だけを引っこ抜く
+            id_match = re.search(r'/(\d+)(?:\?|$)', href)
+            if not id_match:
+                continue  # 数字が含まれない不正なリンクはスキップ
+            
+            card_id = id_match.group(1)
+            # ご提示いただいた正しいURL（新品・中古共通の通常URL）に完全固定して再構築
+            product_url = f"https://snkrdunk.com/apparels/{card_id}"
 
             name, rarity, card_no, pack = parse_title(full_title)
             
@@ -304,16 +309,14 @@ if st.session_state.running:
             else:
                 new_rows.append(row_data)
                 st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
-                # 今回追加したものを配列ベースでマップに仮登録（この後の重複をさらに防ぐ）
                 pokemon_map[run_key] = {"row_num": len(existing_rows) + len(new_rows) + 1}
 
-            # 相手方サーバーへの不可軽減のためランダムなウェイト
+            # 相手方サーバーへの負荷軽減のため適切なウェイト
             time.sleep(random.uniform(2.5, 4.0))
 
-        # 新規取得カードがあればページごとに一括挿入して書き込み速度を最適化
+        # 新規取得カードがあればページごとに一括挿入
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
-            # 反映が済んだらexisting_rowsのトータル行数を同期
             existing_rows.extend(new_rows)
 
         if st.session_state.running:
