@@ -12,19 +12,19 @@ import json
 SPREADSHEET_ID = "1HwNBcYJUSofFS-HkQI9eVLZWnuOJaXPzMmE8nC6E_bY"
 SHEET_NAME = "カード"
 
-HEADERS = ["名前", "レアリティ", "型番（カード番号）", "収録パック", "現在の価格(PSA10中央値)", "最終更新", "URL"]
+HEADERS = ["名前", "レアリティ", "型番（カード番号）", "収録パック", "現在の価格(PSA10直近6件平均)", "最終更新", "URL"]
 SPOOFED_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
 }
+# 判定用レアリティ一覧
 RARITY_LIST = ["SAR","SR","AR","CHR","CSR","UR","HR","RRR","RR","R","C","U","P","PROMO","MUR","MA"]
 
-# --- スプレッドシート接続関数（Secrets対応版） ---
+# --- スプレッドシート接続関数 ---
 def get_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    # StreamlitのSecrets（管理画面から設定する隠し環境変数）から認証情報を取得
     try:
         service_account_info = json.loads(st.secrets["gcp_service_account"])
     except Exception as e:
@@ -43,8 +43,8 @@ def get_sheet():
 
 # --- Streamlit 画面構成 ---
 st.set_page_config(page_title="ポケカ価格自動反映ツール", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（スニダン連携）")
-st.write("ボタンを押すとスニダンのPSA10相場をスクレイピングし、指定のスプレッドシートを自動更新します。")
+st.title("🃏 ポケカ価格自動反映ツール（名称・履歴最適化版）")
+st.write("ボタンを押すと、スニダンの「最近の売買履歴」からPSA10の直近6件平均価格を計算して自動反映します。")
 
 # サイドバーに設定表示
 st.sidebar.header("現在の設定")
@@ -63,17 +63,16 @@ if st.button("🔄 価格更新を開始する", type="primary"):
     existing_rows = sheet.get_all_values()
     pokemon_map = {}
     if len(existing_rows) > 0 and existing_rows[0][0] == "名前":
-        for idx, row in enumerate(existing_rows[1:], start=2): # 1行目はヘッダーなので2行目から
+        for idx, row in enumerate(existing_rows[1:], start=2):
             if len(row) >= 3:
                 key = f"{row[0]}_{row[1]}_{row[2]}"
                 pokemon_map[key] = {"row_num": idx, "price": row[4] if len(row) > 4 else ""}
 
-    # ログ出力用のプレースホルダー
     log_area = st.empty()
     progress_bar = st.progress(0)
     
     current_page = 1
-    max_pages = 5 # 負荷を考慮し、まずは5ページ制限
+    max_pages = 5  # 5ページ制限
     
     all_success_count = 0
 
@@ -127,68 +126,87 @@ if st.button("🔄 価格更新を開始する", type="primary"):
             rarity = ""
             name = ""
 
-            pack_match = re.search(r'\((.*?)\)$', full_title)
-            if pack_match: pack = pack_match.group(1)
+            # 1. 収録パックの抽出 (一番後ろのかっこ)
+            pack_match = re.search(r'\(([^)]+)\)$', full_title.strip())
+            if pack_match: 
+                pack = pack_match.group(1)
             
-            bracket_match = re.search(r'\[(.*?)\]', full_title)
-            if bracket_match: card_no = bracket_match.group(1)
+            # 2. 型番（カード番号）の抽出 [ ] の中身
+            bracket_match = re.search(r'\[([^\]]+)\]', full_title)
+            if bracket_match: 
+                card_no = bracket_match.group(1)
 
+            # 3. 名前とレアリティの分離 ([ より前の部分を解析)
             before_bracket = full_title.split("[")[0].strip()
+            
+            # 末尾がレアリティ一覧のどれかで終わっているか前方一致チェック
+            has_rarity = False
             for r in RARITY_LIST:
-                if before_bracket.endswith(f" {r}"):
+                if before_bracket.endswith(f" {r}") or before_bracket.endswith(f" {r}"):  # 半角・全角スペース考慮
                     rarity = r
-                    name = before_bracket[:-(len(r)+1)].strip()
+                    # レアリティとその前のスペースを取り除いたものを名前にする
+                    name = re.sub(r'\s+' + r + '$', '', before_bracket).strip()
+                    has_rarity = True
                     break
-            if not name: name = before_bracket
+            
+            # レアリティが見つからなかった場合は全体を名前にし、レアリティは空欄にする
+            if not has_rarity:
+                name = before_bracket
+                rarity = ""
 
+            # 商品のベースURLを整形
             clean_path = used_path.split('?')[0]
             id_match = re.search(r'\/apparels\/(\d+)', clean_path)
             apparel_id = id_match.group(1) if id_match else "730964"
             clean_product_url = f"https://snkrdunk.com/apparels/{apparel_id}"
 
-            search_query = f"{name} {card_no} PSA10".strip()
-            direct_search_url = f"https://snkrdunk.com/search?keywords={requests.utils.quote(search_query)}"
+            log_area.text(f"[{idx+1}/{len(matches)}] 個別売買履歴 解析中: {name} [{card_no}]")
             
-            log_area.text(f"[{idx+1}/{len(matches)}] PSA10相場判定中: {name} ({card_no})")
-            
-            psa_prices = []
+            psa10_prices = []
             try:
-                s_res = requests.get(direct_search_url, headers=SPOOFED_HEADERS, timeout=10)
+                # 詳細ページ（used）にアクセス
+                detail_res = requests.get(f"{clean_product_url}/used", headers=SPOOFED_HEADERS, timeout=10)
                 time.sleep(2.5)
-                search_html = s_res.text
-                product_blocks = re.split(r'<a[^>]*href=', search_html, flags=re.IGNORECASE)
                 
-                for block in product_blocks[1:]:
-                    if "PSA10" in block and (name in block or (card_no and card_no in block)):
-                        p_match = re.search(r'-\s*¥\s*([\d,]+)', block, re.IGNORECASE) or re.search(r'¥\s*([\d,]+)', block, re.IGNORECASE)
-                        if p_match:
-                            num_price = int(p_match.group(1).replace(",", ""))
-                            if num_price > 100:
-                                psa_prices.append(num_price)
+                if detail_res.status_code == 200:
+                    detail_html = detail_res.text
+                    
+                    # 各売買履歴の<li>ブロック（<li class="used">...</li>）を切り出し
+                    history_blocks = re.findall(r'<li class="used">(.*?)</li>', detail_html, re.DOTALL)
+                    
+                    for block in history_blocks:
+                        # 状態（size）が「PSA10」のものだけを抽出
+                        size_match = re.search(r'<p class="size">([^<]+)</p>', block)
+                        if size_match and "PSA10" in size_match.group(1):
+                            # 価格（price）を抽出
+                            price_match = re.search(r'<p class="price">¥\s*([\d,]+)</p>', block)
+                            if price_match:
+                                num_price = int(price_match.group(1).replace(",", ""))
+                                psa10_prices.append(num_price)
+                                
+                        # 直近6件集まったらループを抜ける
+                        if len(psa10_prices) >= 6:
+                            break
             except Exception as e:
                 pass
 
-            psa_median = ""
-            if psa_prices:
-                psa_prices.sort()
-                lowest_prices = psa_prices[:6]
-                half = len(lowest_prices) // 2
-                if len(lowest_prices) % 2 != 0:
-                    psa_median = lowest_prices[half]
-                else:
-                    psa_median = round((lowest_prices[half - 1] + lowest_prices[half]) / 2)
+            # 直近最大6件の「平均価格」を計算
+            psa_avg = ""
+            if psa10_prices:
+                psa_avg = round(sum(psa10_prices) / len(psa10_prices))
 
+            # スプレッドシート反映用の一致キー
             key = f"{name}_{rarity}_{card_no}"
             if key in pokemon_map:
                 row_info = pokemon_map[key]
-                final_price = psa_median if psa_median != "" else row_info["price"]
+                final_price = psa_avg if psa_avg != "" else row_info["price"]
                 
                 sheet.update_cell(row_info["row_num"], 5, final_price)
                 sheet.update_cell(row_info["row_num"], 6, now_str)
                 sheet.update_cell(row_info["row_num"], 7, clean_product_url)
             else:
-                new_rows_buffer.append([name, rarity, card_no, pack, psa_median, now_str, clean_product_url])
-                pokemon_map[key] = {"row_num": len(existing_rows) + len(new_rows_buffer) + 1, "price": psa_median}
+                new_rows_buffer.append([name, rarity, card_no, pack, psa_avg, now_str, clean_product_url])
+                pokemon_map[key] = {"row_num": len(existing_rows) + len(new_rows_buffer) + 1, "price": psa_avg}
 
             all_success_count += 1
 
@@ -200,4 +218,4 @@ if st.button("🔄 価格更新を開始する", type="primary"):
 
     progress_bar.progress(1.0)
     st.balloons()
-    st.success(f"全体の処理が完了しました！計 {all_success_count} 件のカード情報を同期しました。")
+    st.success(f"全体の処理が完了しました！計 {all_success_count} 件のカード価格を直近6件平均に同期しました。")
