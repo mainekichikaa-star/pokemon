@@ -3,4 +3,4 @@ requests
 beautifulsoup4
 gspread
 oauth2client
-playwright
+playwright==1.52.0
