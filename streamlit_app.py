@@ -3,7 +3,6 @@ import requests
 import re
 import time
 import random
-import os
 import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -13,23 +12,20 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================================
-# 【重要】Playwrightのブラウザ自動インストール処理
+# Playwrightのブラウザ自動インストール処理
 # =========================================
 @st.cache_resource
 def install_playwright_browsers():
     try:
-        # 画面にインストール中であることを出さないよう、バックグラウンドで実行
         subprocess.run(["playwright", "install", "chromium"], check=True)
         return True
     except Exception as e:
         st.error(f"Playwrightブラウザのインストールに失敗しました: {e}")
         return False
 
-# ブラウザのセットアップを実行
 with st.spinner("システムを準備中..."):
     install_playwright_browsers()
 
-# インストール完了後に読み込む
 from playwright.sync_api import sync_playwright
 
 # =========================================
@@ -80,10 +76,7 @@ def get_sheet():
             pk = pk.replace("\\n", "\n")
         service_account_info["private_key"] = pk
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        service_account_info,
-        scope
-    )
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
     client = gspread.authorize(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -115,7 +108,7 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 【画面出力デバッグ版】PSA10価格取得
+# 価格取得（ポップアップ強制突破版）
 # =========================================
 
 def get_psa10_price_debug(product_url, debug_container):
@@ -149,15 +142,16 @@ def get_psa10_price_debug(product_url, debug_container):
             debug_container.write(f"📊 画面内の「PSA10」ボタン発見数: {label_count}")
 
             if label_count > 0:
-                psa10_label.first.click()
-                debug_container.success("クリック成功、データ読み込みを待機中...")
+                # 【最重要】force=True を指定して、Buyeeのポップアップを無視して強制クリック！
+                psa10_label.first.click(force=True)
+                debug_container.success("💥 強制クリック成功。データ読み込みを待機中...")
                 time.sleep(3.0)
                 
-                # クリック後の画面
+                # クリック後の画面を表示して確認
                 img_bytes_after = page.screenshot()
                 debug_container.image(img_bytes_after, caption="【デバッグ】PSA10クリック後の画面")
             else:
-                debug_container.error("❌ PSA10という文字の入ったボタンが見つかりません。")
+                debug_container.error("❌ PSA10ボタンが見つかりません。")
                 browser.close()
                 return "なし"
 
@@ -216,9 +210,9 @@ def get_psa10_price_debug(product_url, debug_container):
 # Streamlit UI
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（デバッグ版）", layout="wide")
+st.set_page_config(page_title="ポケカ価格自動反映（ポップアップ突破版）", layout="wide")
 st.title("🃏 ポケカ価格自動反映ツール（1ページ限定検証モード）")
-st.write("環境依存エラーを対策。1ページ目のみ処理を実行し、画面上にリアルタイムログを表示します。")
+st.write("Buyeeの被さり広告を強制突破する処理を追加しました。")
 
 start_button = st.button("🔄 検証モードで更新開始", type="primary")
 
@@ -270,6 +264,7 @@ if start_button:
     now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
     new_rows = []
 
+    # 確実に検証するため、まずは最初の3つの商品でテストを行います
     for idx, match in enumerate(matches):
         href = match[0]
         full_title = match[1]
@@ -303,4 +298,4 @@ if start_button:
     if new_rows:
         sheet.append_rows(new_rows)
 
-    st.success("1ページ目のテスト処理が完了しました。")
+    st.success("1ページ目のテスト処理が完了しました！シートへの反映と合わせてログの「価格」をご確認ください。")
