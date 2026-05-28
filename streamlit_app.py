@@ -26,27 +26,23 @@ def get_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
     if "gcp_service_account" not in st.secrets:
-        st.error("StreamlitのSecretsに 'gcp_service_account' が設定されていません。")
+        st.error("StreamlitのSecretsに 'gcp_service_account' グループが設定されていません。")
         st.stop()
         
     try:
-        # Secretsから取得
-        secret_data = st.secrets["gcp_service_account"]
+        # Secretsの [gcp_service_account] データを辞書型としてそのまま安全に取得
+        service_account_info = dict(st.secrets["gcp_service_account"])
         
-        # どんな貼り付け方をされても安全にdict型に変換するロジック
-        if isinstance(secret_data, str):
-            # 文字列として取得された場合、パディング（文字欠け）を自動補正
-            clean_text = secret_data.strip()
-            missing_padding = len(clean_text) % 4
-            if missing_padding:
-                clean_text += '=' * (4 - missing_padding)
-            service_account_info = json.loads(clean_text)
-        else:
-            # Streamlitが自動で辞書として展開してくれた場合
-            service_account_info = dict(secret_data)
-            
+        # private_key 内の実際の改行を、ライブラリが読めるように \n 文字に整形
+        if "private_key" in service_account_info:
+            pk = service_account_info["private_key"]
+            # すでに \n 形式になっていない場合、実際の改行コードを \n に置換
+            if "\\n" not in pk:
+                pk = pk.replace("\n", "\\n").replace("\\n-----BEGIN PRIVATE KEY-----\\n", "-----BEGIN PRIVATE KEY-----\n").replace("\\n-----END PRIVATE KEY-----\\n", "\n-----END PRIVATE KEY-----\n")
+                service_account_info["private_key"] = pk
+                
     except Exception as e:
-        st.error(f"Secretsの認証情報解析に失敗しました。貼り付け形式を確認してください: {e}")
+        st.error(f"Secretsの認証情報解析に失敗しました。TOML形式を確認してください: {e}")
         st.stop()
         
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
