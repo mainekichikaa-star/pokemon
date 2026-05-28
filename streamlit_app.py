@@ -30,15 +30,26 @@ def get_sheet():
         st.stop()
         
     try:
-        # Secretsの [gcp_service_account] データを辞書型としてそのまま安全に取得
+        # Secretsのデータを取得（一旦通常の辞書型にする）
         service_account_info = dict(st.secrets["gcp_service_account"])
         
-        # private_key 内の実際の改行を、ライブラリが読めるように \n 文字に整形
+        # 複数行のprivate_keyを、ライブラリが認識できる正しい \n 埋め込み形式に強制クリーニング
         if "private_key" in service_account_info:
             pk = service_account_info["private_key"]
-            # すでに \n 形式になっていない場合、実際の改行コードを \n に置換
-            if "\\n" not in pk:
-                pk = pk.replace("\n", "\\n").replace("\\n-----BEGIN PRIVATE KEY-----\\n", "-----BEGIN PRIVATE KEY-----\n").replace("\\n-----END PRIVATE KEY-----\\n", "\n-----END PRIVATE KEY-----\n")
+            
+            # 文字列の中の余計な空白や改行をすべてリスト化して整理
+            lines = [line.strip() for line in pk.split("\n") if line.strip()]
+            
+            # ヘッダーとフッターが正しく存在する場合、中身の鍵だけを結合して再構築
+            if any("BEGIN PRIVATE KEY" in l for l in lines) and any("END PRIVATE KEY" in l for l in lines):
+                # 純粋な鍵データ部分を取り出す
+                clean_lines = [l for l in lines if "PRIVATE KEY" not in l]
+                inner_key = "".join(clean_lines)
+                # ライブラリが要求する正しいフォーマット（\n文字で区切られた1本の文字列）に強制成形
+                service_account_info["private_key"] = f"-----BEGIN PRIVATE KEY-----\n{inner_key}\n-----END PRIVATE KEY-----\n"
+            else:
+                # 既に1行になっている場合は通常の置換処理
+                pk = pk.replace("\\n", "\n")
                 service_account_info["private_key"] = pk
                 
     except Exception as e:
