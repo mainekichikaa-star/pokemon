@@ -3,13 +3,34 @@ import requests
 import re
 import time
 import random
+import os
+import subprocess
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from statistics import median
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+# =========================================
+# 【重要】Playwrightのブラウザ自動インストール処理
+# =========================================
+@st.cache_resource
+def install_playwright_browsers():
+    try:
+        # 画面にインストール中であることを出さないよう、バックグラウンドで実行
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+        return True
+    except Exception as e:
+        st.error(f"Playwrightブラウザのインストールに失敗しました: {e}")
+        return False
+
+# ブラウザのセットアップを実行
+with st.spinner("システムを準備中..."):
+    install_playwright_browsers()
+
+# インストール完了後に読み込む
+from playwright.sync_api import sync_playwright
 
 # =========================================
 # 設定
@@ -59,7 +80,10 @@ def get_sheet():
             pk = pk.replace("\\n", "\n")
         service_account_info["private_key"] = pk
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        service_account_info,
+        scope
+    )
     client = gspread.authorize(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -115,9 +139,9 @@ def get_psa10_price_debug(product_url, debug_container):
             page.goto(base_url, wait_until="networkidle", timeout=60000)
             time.sleep(2.0)
 
-            # デバッグ用：アクセス直後の画面キャプチャをStreamlitに表示
+            # アクセス直後の画面キャプチャを表示
             img_bytes = page.screenshot()
-            debug_container.image(img_bytes, caption="【デバッグ】ページアクセス時の画面（ブロックされてないか確認）")
+            debug_container.image(img_bytes, caption="【デバッグ】ページアクセス時の画面")
 
             # 「PSA10」のボタンを探す
             psa10_label = page.locator("label:has-text('PSA10')")
@@ -127,13 +151,13 @@ def get_psa10_price_debug(product_url, debug_container):
             if label_count > 0:
                 psa10_label.first.click()
                 debug_container.success("クリック成功、データ読み込みを待機中...")
-                time.sleep(3.0)  # グラフ変化を長めに待つ
+                time.sleep(3.0)
                 
-                # クリック後の画面も確認
+                # クリック後の画面
                 img_bytes_after = page.screenshot()
                 debug_container.image(img_bytes_after, caption="【デバッグ】PSA10クリック後の画面")
             else:
-                debug_container.error("❌ PSA10という文字の入ったボタン（ラベル）が見つかりません。")
+                debug_container.error("❌ PSA10という文字の入ったボタンが見つかりません。")
                 browser.close()
                 return "なし"
 
@@ -156,7 +180,6 @@ def get_psa10_price_debug(product_url, debug_container):
             html = page.content()
             browser.close()
 
-        # JS抽出結果の確認
         debug_container.write(f"📈 グラフから抽出された生の配列データ: {chart_data}")
 
         if chart_data:
@@ -179,7 +202,7 @@ def get_psa10_price_debug(product_url, debug_container):
                     if 500 < val < 10000000:
                         raw_prices.append(val)
 
-        debug_container.write(f"🔍 テキストから見つかった金額っぽい数字（上位15件）: {raw_prices[:15]}")
+        debug_container.write(f"🔍 テキストから見つかった金額っぽい数字: {raw_prices[:15]}")
         if raw_prices:
             return int(median(raw_prices[-6:]))
 
@@ -195,13 +218,9 @@ def get_psa10_price_debug(product_url, debug_container):
 
 st.set_page_config(page_title="ポケカ価格自動反映（デバッグ版）", layout="wide")
 st.title("🃏 ポケカ価格自動反映ツール（1ページ限定検証モード）")
-st.write("1ページ目のみ処理を実行し、画面上にブラウザの動きとエラーの原因をリアルタイム表示します。")
+st.write("環境依存エラーを対策。1ページ目のみ処理を実行し、画面上にリアルタイムログを表示します。")
 
 start_button = st.button("🔄 検証モードで更新開始", type="primary")
-
-# =========================================
-# 実行
-# =========================================
 
 if start_button:
     sheet = get_sheet()
@@ -216,11 +235,8 @@ if start_button:
             pokemon_map[key] = {"row_num": idx}
 
     log_area = st.empty()
-    
-    # デバッグ情報を画面にまとめて出すための専用プレースホルダー
     debug_container = st.container()
 
-    # ★1ページのみ実行
     current_page = 1
     log_area.markdown(f"## 📝 現在の処理: ページ {current_page} のみ")
 
@@ -254,7 +270,6 @@ if start_button:
     now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
     new_rows = []
 
-    # 最初の数件をテスト
     for idx, match in enumerate(matches):
         href = match[0]
         full_title = match[1]
@@ -264,10 +279,8 @@ if start_button:
 
         name, rarity, card_no, pack = parse_title(full_title)
         
-        # 画面上の見出しを更新
         log_area.markdown(f"### 🔄 現在処理中: **{name}** ({idx+1}/{len(matches)}件目)")
         
-        # デバッグコンテナを都度クリアして現在のカードのログを表示
         with debug_container:
             st.markdown(f"---")
             psa_price = get_psa10_price_debug(product_url, st)
@@ -281,7 +294,6 @@ if start_button:
         else:
             new_rows.append(row_data)
 
-        # 最初の3件だけで一度結果を見るためにストップをかける仕掛け（必要に応じて外してください）
         if idx >= 2:
             st.info("検証用に最初の3件で一旦止めています。")
             break
