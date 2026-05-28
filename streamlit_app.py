@@ -25,16 +25,28 @@ RARITY_LIST = ["SAR","SR","AR","CHR","CSR","UR","HR","RRR","RR","R","C","U","P",
 def get_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    # StreamlitのSecretsに設定があるか確認
     if "gcp_service_account" not in st.secrets:
         st.error("StreamlitのSecretsに 'gcp_service_account' が設定されていません。")
         st.stop()
         
-    # パディングエラーを防ぐため、dict型として安全に読み込む（json.loadsは使わない）
     try:
-        service_account_info = dict(st.secrets["gcp_service_account"])
+        # Secretsから取得
+        secret_data = st.secrets["gcp_service_account"]
+        
+        # どんな貼り付け方をされても安全にdict型に変換するロジック
+        if isinstance(secret_data, str):
+            # 文字列として取得された場合、パディング（文字欠け）を自動補正
+            clean_text = secret_data.strip()
+            missing_padding = len(clean_text) % 4
+            if missing_padding:
+                clean_text += '=' * (4 - missing_padding)
+            service_account_info = json.loads(clean_text)
+        else:
+            # Streamlitが自動で辞書として展開してくれた場合
+            service_account_info = dict(secret_data)
+            
     except Exception as e:
-        st.error(f"Secretsの読み込みに失敗しました。TOML形式を確認してください: {e}")
+        st.error(f"Secretsの認証情報解析に失敗しました。貼り付け形式を確認してください: {e}")
         st.stop()
         
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
