@@ -25,10 +25,16 @@ RARITY_LIST = ["SAR","SR","AR","CHR","CSR","UR","HR","RRR","RR","R","C","U","P",
 def get_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
+    # StreamlitのSecretsに設定があるか確認
+    if "gcp_service_account" not in st.secrets:
+        st.error("StreamlitのSecretsに 'gcp_service_account' が設定されていません。")
+        st.stop()
+        
+    # パディングエラーを防ぐため、dict型として安全に読み込む（json.loadsは使わない）
     try:
-        service_account_info = json.loads(st.secrets["gcp_service_account"])
+        service_account_info = dict(st.secrets["gcp_service_account"])
     except Exception as e:
-        st.error("StreamlitのSecretsに 'gcp_service_account' が設定されていないか、JSONの形式が正しくありません。")
+        st.error(f"Secretsの読み込みに失敗しました。TOML形式を確認してください: {e}")
         st.stop()
         
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
@@ -142,7 +148,7 @@ if st.button("🔄 価格更新を開始する", type="primary"):
             # 末尾がレアリティ一覧のどれかで終わっているか前方一致チェック
             has_rarity = False
             for r in RARITY_LIST:
-                if before_bracket.endswith(f" {r}") or before_bracket.endswith(f" {r}"):  # 半角・全角スペース考慮
+                if before_bracket.endswith(f" {r}") or before_bracket.endswith(f" {r}"):  # 半角・全角スペース考慮
                     rarity = r
                     # レアリティとその前のスペースを取り除いたものを名前にする
                     name = re.sub(r'\s+' + r + '$', '', before_bracket).strip()
