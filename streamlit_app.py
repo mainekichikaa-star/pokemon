@@ -4,6 +4,7 @@ import re
 import time
 import random
 import subprocess
+import html  # 文字化け（&amp;等）の解除用
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from statistics import median
@@ -33,14 +34,14 @@ from playwright.sync_api import sync_playwright
 # =========================================
 
 SPREADSHEET_ID = "1HwNBcYJUSofFS-HkQI9eVLZWnuOJaXPzMmE8nC6E_bY"
-SHEET_NAME = "カード"
+SHEET_NAME = "カード（PSA10）"  # 【変更】指定のシート名
 
 HEADERS = [
     "名前",
     "レアリティ",
-    "型番（カード番号）",
+    "品番",          # 【変更】型番から「品番」へ
     "収録パック",
-    "現在の価格(PSA10直近6件中央値)",
+    "現在の価格",    # 【変更】指定の項目名へ
     "最終更新",
     "URL"
 ]
@@ -87,6 +88,9 @@ def get_sheet():
         return sheet
 
 def parse_title(full_title):
+    # 【対策】HTML特殊文字（&amp;など）を通常の文字（&など）にデコード
+    full_title = html.unescape(full_title)
+    
     pack = ""
     card_no = ""
     rarity = ""
@@ -108,19 +112,21 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（最適化版）
+# 価格＆開いたページのURL取得ロジック（PSA10相場特化版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """起動済みのページオブジェクトを使い回してアクセス制限を回避する"""
+    """相場ページ（/sales-histories）へ直接アクセスして、PSA10の直近売買履歴を取得する"""
     target_median = "なし"
-    final_url = product_url
+    # 実測URLのベースを作る
+    final_url = product_url.split("/sales-histories")[0].split("?")[0]
+    
+    # 状態ごとの相場ページURLへ直接書き換え
+    history_url = f"{final_url}/sales-histories?slide=right"
 
     try:
-        page.goto(product_url, wait_until="networkidle", timeout=45000)
+        page.goto(history_url, wait_until="networkidle", timeout=45000)
         time.sleep(1.0)
-
-        final_url = page.url.split("/sales-histories")[0].split("?")[0]
 
         # Buyeeポップアップの消去処理
         page.evaluate("""
@@ -133,16 +139,11 @@ def get_psa10_data_from_page(page, product_url):
         """)
         time.sleep(0.3)
 
-        # 「PSA10」のボタンを強制クリック
-        psa10_label = page.locator("label:has-text('PSA10')")
-        if psa10_label.count() > 0:
-            psa10_label.first.click(force=True)
-            time.sleep(1.2)
-
-        html = page.content()
-
-        soup = BeautifulSoup(html, "html.parser")
+        html_content = page.content()
+        soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
+        
+        # 相場専用ページ内の売買履歴リストを取得
         history_items = soup.select("ul.sales-history.item-list li")
 
         for item in history_items:
@@ -153,10 +154,12 @@ def get_psa10_data_from_page(page, product_url):
                 size_text = size_elem.get_text(strip=True)
                 price_text = price_elem.get_text(strip=True)
 
+                # 「PSA10」の表記がある履歴の価格のみを抽出
                 if "PSA10" in size_text:
                     clean_price = int(re.sub(r"[^\d]", "", price_text))
                     psa10_prices.append(clean_price)
 
+        # 直近6件の売買履歴から中央値を算出
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
@@ -172,7 +175,7 @@ def get_psa10_data_from_page(page, product_url):
 
 st.set_page_config(page_title="ポケカ価格自動反映（最新版）", layout="wide")
 st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・実測URL反映）")
-st.write("ブラウザ再起動の負荷によるフリーズを修正し、途中ページからの再開レジュメに対応した安定版です。")
+st.write("文字化けを解消し、PSA10の相場ページから確実に履歴価格を引っこ抜く完全版です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -308,7 +311,7 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-                # 【修正】毎回ブラウザを閉じず、同一ページオブジェクトを再利用して高速化・制限回避
+                # 修正したPSA10相場ページ巡回ロジックを呼び出し
                 psa_price, real_product_url = get_psa10_data_from_page(page, access_url)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
