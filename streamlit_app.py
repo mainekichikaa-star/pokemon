@@ -34,14 +34,14 @@ from playwright.sync_api import sync_playwright
 # =========================================
 
 SPREADSHEET_ID = "1HwNBcYJUSofFS-HkQI9eVLZWnuOJaXPzMmE8nC6E_bY"
-SHEET_NAME = "カード（PSA10）"  # 【変更】指定のシート名
+SHEET_NAME = "カード（PSA10）"
 
 HEADERS = [
     "名前",
     "レアリティ",
-    "品番",          # 【変更】型番から「品番」へ
+    "品番",
     "収録パック",
-    "現在の価格",    # 【変更】指定の項目名へ
+    "現在の価格",
     "最終更新",
     "URL"
 ]
@@ -88,7 +88,6 @@ def get_sheet():
         return sheet
 
 def parse_title(full_title):
-    # 【対策】HTML特殊文字（&amp;など）を通常の文字（&など）にデコード
     full_title = html.unescape(full_title)
     
     pack = ""
@@ -112,23 +111,20 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（PSA10相場特化版）
+# 価格＆開いたページのURL取得ロジック（PSA10領域狙い撃ち版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """相場ページ（/sales-histories）へ直接アクセスして、PSA10の直近売買履歴を取得する"""
+    """他の状態（状態Dなど）を無視し、『状態PSA10の売買履歴』のリストだけを狙い撃つ"""
     target_median = "なし"
-    # 実測URLのベースを作る
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
-    
-    # 状態ごとの相場ページURLへ直接書き換え
     history_url = f"{final_url}/sales-histories?slide=right"
 
     try:
         page.goto(history_url, wait_until="networkidle", timeout=45000)
         time.sleep(1.0)
 
-        # Buyeeポップアップの消去処理
+        # Buyeeポップアップの消去
         page.evaluate("""
             () => {
                 const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
@@ -143,23 +139,32 @@ def get_psa10_data_from_page(page, product_url):
         soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
         
-        # 相場専用ページ内の売買履歴リストを取得
-        history_items = soup.select("ul.sales-history.item-list li")
+        # 【修正ポイント】「状態PSA10の売買履歴」という見出しを検索
+        h2_tags = soup.find_all("h2", class_="size-title")
+        psa10_ul = None
+        
+        for h2 in h2_tags:
+            if "状態PSA10の売買履歴" in h2.get_text():
+                # 見出しの直後にある ul.sales-history.item-list を取得
+                psa10_ul = h2.find_next("ul", class_="sales-history")
+                break
+        
+        # PSA10専用のリストが見つかった場合のみ解析を実行
+        if psa10_ul:
+            history_items = psa10_ul.select("li")
+            for item in history_items:
+                size_elem = item.select_one("p.size")
+                price_elem = item.select_one("p.price")
 
-        for item in history_items:
-            size_elem = item.select_one("p.size")
-            price_elem = item.select_one("p.price")
+                if size_elem and price_elem:
+                    size_text = size_elem.get_text(strip=True)
+                    price_text = price_elem.get_text(strip=True)
 
-            if size_elem and price_elem:
-                size_text = size_elem.get_text(strip=True)
-                price_text = price_elem.get_text(strip=True)
+                    if "PSA10" in size_text:
+                        clean_price = int(re.sub(r"[^\d]", "", price_text))
+                        psa10_prices.append(clean_price)
 
-                # 「PSA10」の表記がある履歴の価格のみを抽出
-                if "PSA10" in size_text:
-                    clean_price = int(re.sub(r"[^\d]", "", price_text))
-                    psa10_prices.append(clean_price)
-
-        # 直近6件の売買履歴から中央値を算出
+        # 直近6件から中央値を算出
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
@@ -173,9 +178,9 @@ def get_psa10_data_from_page(page, product_url):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（最新版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（無限全ページ巡回・実測URL反映）")
-st.write("文字化けを解消し、PSA10の相場ページから確実に履歴価格を引っこ抜く完全版です。")
+st.set_page_config(page_title="ポケカ価格自動反映（バグ修正版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（PSA10領域ピンポイント取得版）")
+st.write("他状態（状態D等）の履歴が混在していても、PSA10の履歴だけを確実に選別して中央値を計算します。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -214,7 +219,6 @@ if st.session_state.running:
     st.info("📊 最新データを取得するため、Googleシートをスキャン中...")
     existing_rows = sheet.get_all_values()
     
-    # 現在のシート上のデータ件数を正確に把握
     current_total_rows = len(existing_rows)
     pokemon_map = {}
 
@@ -250,7 +254,7 @@ if st.session_state.running:
             break
 
         if res.status_code == 404:
-            st.success(f"🎉 最終ページに到達したため、全巡回を完了しました！（最終: {current_page-1}ページ）")
+            st.success(f"🎉 全巡回を完了しました！（最終: {current_page-1}ページ）")
             st.session_state.current_page = 1
             st.session_state.running = False
             break
@@ -262,18 +266,15 @@ if st.session_state.running:
         matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
 
         if not matches:
-            st.success(f"🎉 商品が見つからなくなったため、全ページの巡回を完了しました！（合計: {current_page-1}ページ走破）")
+            st.success(f"🎉 全ページの巡回を完了しました！（合計: {current_page-1}ページ走破）")
             st.session_state.current_page = 1
             st.session_state.running = False
             break
 
-        # 1ページ最大30商品制限
         matches = matches[:30]
-
         new_rows = []
         total_items = len(matches)
 
-        # 1ページ分（30商品）を一気に回すため、ブラウザをここで1回だけ立ち上げる
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -293,7 +294,6 @@ if st.session_state.running:
                 href = match[0]
                 full_title = match[1]
 
-                # 先頭直後の正しい5桁IDだけをピンポイント抽出
                 id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
                 if not id_match:
                     continue
@@ -311,36 +311,31 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-                # 修正したPSA10相場ページ巡回ロジックを呼び出し
+                # 正確になったPSA10抽出処理を走らせる
                 psa_price, real_product_url = get_psa10_data_from_page(page, access_url)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
                 row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
 
-                # Googleスプレッドシート重複・キャッシュチェック
                 if run_key in pokemon_map:
                     row_num = pokemon_map[run_key]["row_num"]
                     sheet.update(f"A{row_num}:G{row_num}", [row_data])
                     st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price}")
                 else:
-                    # 新規追加データをリストに追加
                     new_rows.append(row_data)
                     st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
-                    
-                    # 【キャッシュ位置ズレ対策】
                     current_total_rows += 1
                     pokemon_map[run_key] = {"row_num": current_total_rows}
 
                 time.sleep(random.uniform(2.5, 4.0))
 
-            browser.close() # 1ページ（30件）終わったらブラウザを安全に終了
+            browser.close()
 
-        # 新規取得カードの一括挿入
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
 
         if st.session_state.running:
-            st.session_state.current_page += 1  # ページカウントを安全に進める
+            st.session_state.current_page += 1
             time.sleep(3.5)
         else:
             st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
