@@ -45,7 +45,7 @@ HEADERS = [
 SPOOFED_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, height=800) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
@@ -122,7 +122,7 @@ def get_box_data_from_page(page, product_url):
                     total_price = int(re.sub(r"[^\d]", "", price_text))
                     
                     if count > 0:
-                        # 1個あたりの価格を計算（端数四捨五入/切り捨て考慮でint型へ）
+                        # 1個あたりの価格を計算（端数切り捨てでint型へ変換）
                         unit_price = int(total_price / count)
                         unit_prices.append(unit_price)
                 except ValueError:
@@ -191,7 +191,7 @@ if st.session_state.running:
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 4:
                 row.append("")
-            key = row[0].strip() # 「名前」をキーにして重複・更新チェック
+            key = row[0].strip() # 「整形後の名前」をキーにして重複・更新チェック
             box_map[key] = {"row_num": idx}
 
     log_area = st.empty()
@@ -264,7 +264,10 @@ if st.session_state.running:
                     break
 
                 href = match[0]
-                name = match[1].strip() # フルタイトルをそのまま「名前」として使用
+                
+                # タイトルの不要な文字列の削除と「&amp;」の置換処理
+                raw_name = match[1].strip()
+                name = raw_name.replace("ポケモンカードゲーム", "").replace("&amp;", "&").strip()
 
                 # 商品IDの抽出
                 id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
