@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 import re
@@ -683,4 +682,3 @@ if st.session_state.running:
     st.session_state.running = False
 
     st.rerun()
-```
