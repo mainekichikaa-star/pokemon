@@ -78,7 +78,8 @@ def get_sheet():
         service_account_info["private_key"] = pk
 
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    client = gspread.authorizecreds(creds)
+    # 【修正】authorizecreds になっていたタイポを authorize に修正
+    client = gspread.authorize(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
     try:
         return workbook.worksheet(SHEET_NAME)
@@ -136,13 +137,13 @@ def get_psa10_data_from_page(page, product_url, screenshot_area):
         """)
         time.sleep(0.5)
 
-        # 【追加】「状態PSA10の売買履歴」の文字がHTML内に出現するまで最大15秒間じっと待つ（読み込み遅延対策）
+        # 「状態PSA10の売買履歴」の文字がHTML内に出現するまで最大15秒間じっと待つ
         try:
             page.wait_for_selector("h2.size-title:has-text('状態PSA10の売買履歴')", timeout=15000)
         except:
-            pass # タイムアウトしても次へ進む
+            pass
 
-        # 【追加】検証用のスクリーンショット撮影（メモリ上に保存してStreamlitに表示）
+        # 検証用のスクリーンショット撮影（メモリ上に保存してStreamlitに表示）
         screenshot_bytes = page.screenshot(full_page=False)
         screenshot_area.image(screenshot_bytes, caption=f"📸 現在のブラウザ目線: {history_url}", use_container_width=True)
 
@@ -226,7 +227,7 @@ with main_col:
 
 with side_col:
     st.write("### 📺 ブラウザのリアルタイム画面")
-    screenshot_area = st.empty()  # スクショを表示する専用スペース
+    screenshot_area = st.empty()
 
 # =========================================
 # メイン巡回ループ
@@ -298,7 +299,7 @@ if st.session_state.running:
             )
             context = browser.new_context(
                 user_agent=SPOOFED_HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 1000}, # 縦を少し広げて見やすく
+                viewport={"width": 1280, "height": 1000},
                 locale="ja-JP"
             )
             page = context.new_page()
@@ -327,7 +328,6 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-                # スクショ表示用エリア（screenshot_area）を引数に渡して実行
                 psa_price, real_product_url = get_psa10_data_from_page(page, access_url, screenshot_area)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
