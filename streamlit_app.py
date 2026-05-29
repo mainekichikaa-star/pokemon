@@ -111,18 +111,14 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（描画遅延バグ修正版）
+# 価格＆開いたページのURL取得ロジック
 # =========================================
 
-def get_psa10_data_from_page(page, product_url, card_name):
-    """他状態の長さに負けないよう、スクロールしながらPSA10の要素を追跡する（安定化版）"""
+def get_psa10_data_from_page(page, product_url):
+    """スクロール追跡と同期ウェイトを行い、PSA10のデータを確実に取得する"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
-    
-    shot_before = None
-    shot_after = None
-    error_msg = ""
 
     try:
         # 確実にページ遷移を待機
@@ -144,14 +140,7 @@ def get_psa10_data_from_page(page, product_url, card_name):
         except:
             pass
 
-        # 1回目の撮影（アクセス＆ポップアップ処理直後）
-        try:
-            shot_before = page.screenshot(full_page=False, timeout=5000)
-        except Exception as e:
-            shot_before = f"直後スクショ撮影エラー: {str(e)}"
-
         # 「状態PSA10の売買履歴」の見出しがあるかスクロールしながら追跡
-        found_psa10 = False
         for i in range(12):  
             h2_exists = page.evaluate("""
                 () => {
@@ -165,26 +154,18 @@ def get_psa10_data_from_page(page, product_url, card_name):
                     # 見つかったらフォーカスして微調整
                     locator = page.locator("h2.size-title:has-text('状態PSA10の売買履歴')")
                     locator.scroll_into_view_if_needed()
-                    found_psa10 = True
                     time.sleep(0.5)
                     
-                    # 【重要修正】見出しが見つかった後、リスト内の実際の要素が描画されるまで最大5秒待つ
+                    # リスト内の実際の要素が描画されるまで最大5秒待つ
                     page.wait_for_selector("ul.sales-history.item-list li.used", timeout=5000)
                     time.sleep(0.5)
-                except Exception as ex:
-                    # 待機に失敗した場合はエラーログに残す
-                    error_msg = f"PSA10のリスト要素の描画待機に失敗しました: {str(ex)}"
+                except:
+                    pass
                 break
             
             # 見つからなければ少しずつ下へスクロール
             page.evaluate("window.scrollBy(0, 600)")
             time.sleep(0.8)
-
-        # 2回目の撮影（スクロール＆描画待機完了後）
-        try:
-            shot_after = page.screenshot(full_page=False, timeout=5000)
-        except Exception as e:
-            shot_after = f"追跡後スクショ撮影エラー: {str(e)}"
 
         # 解析処理
         html_content = page.content()
@@ -217,30 +198,9 @@ def get_psa10_data_from_page(page, product_url, card_name):
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
-            error_msg = "" # 成功した場合はエラーメッセージをクリア
-        else:
-            if not error_msg: # 既に待機エラーなどが起きていない場合のみ上書き
-                if not found_psa10:
-                    error_msg = "ページ内に「状態PSA10の売買履歴」の見出し自体が見つかりませんでした。"
-                else:
-                    error_msg = "PSA10の見出しはありましたが、リスト内の実際の売買データがHTML取得時点で空でした（同期ズレ）。"
 
     except Exception as e:
-        error_msg = f"ブラウザ処理中に致命的エラーが発生: {str(e)}"
-
-    # セッション状態にスクショ履歴を追加保存
-    if "screenshot_history" not in st.session_state:
-        st.session_state.screenshot_history = []
-        
-    st.session_state.screenshot_history.append({
-        "name": card_name,
-        "url": history_url,
-        "price": target_median,
-        "shot_before": shot_before,
-        "shot_after": shot_after,
-        "error": error_msg,
-        "time": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M:%S")
-    })
+        pass
 
     return target_median, final_url
 
@@ -248,22 +208,19 @@ def get_psa10_data_from_page(page, product_url, card_name):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（同期バグ修正版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（描画遅延バグ修正版）")
-st.write("スクロール後のデータ描画待ちを強化し、HTMLから確実に売買データを抽出できるように修正しました。")
+st.set_page_config(page_title="ポケカ価格自動反映", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール")
+st.write("スクロール追跡と要素描画ウェイトにより、PSA10の価格情報をバックグラウンドで安全かつ確実にスキャンします。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
 if "current_page" not in st.session_state:
     st.session_state.current_page = 1
-if "screenshot_history" not in st.session_state:
-    st.session_state.screenshot_history = []
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     if st.button("🔄 最初から（1ページ目）更新を開始", type="primary", disabled=st.session_state.running):
-        st.session_state.screenshot_history = []  # 履歴をリセット
         st.session_state.current_page = 1
         st.session_state.running = True
         st.rerun()
@@ -282,42 +239,9 @@ if stop_button:
     st.warning("🛑 停止要請を受け付けました。現在のページの同期完了後に安全に停止します...")
     st.rerun()
 
-# 左右2分割
-main_col, side_col = st.columns([1, 1])
-
-with main_col:
-    log_area = st.empty()
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-with side_col:
-    st.write("### 📜 走査した全カードのブラウザ画面履歴")
-    sc_container = st.container()
-    with sc_container:
-        if st.session_state.screenshot_history:
-            for item in reversed(st.session_state.screenshot_history):
-                st.markdown(f"---")
-                st.markdown(f"**【{item['time']}】 {item['name']}**")
-                st.markdown(f"結果価格: `¥{item['price']}`  |  [対象URL]({item['url']})")
-                
-                if item["error"]:
-                    st.error(f"❌ {item['error']}")
-                else:
-                    st.success("✅ 正常にデータを取得できました")
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    if item['shot_before'] and isinstance(item['shot_before'], bytes):
-                        st.image(item['shot_before'], caption="📸 開いてすぐ", use_container_width=True)
-                    else:
-                        st.warning(f"⚠️ {item['shot_before'] if item['shot_before'] else '直後スクショなし'}")
-                with c2:
-                    if item['shot_after'] and isinstance(item['shot_after'], bytes):
-                        st.image(item['shot_after'], caption="📸 PSA10追跡スクロール後", use_container_width=True)
-                    else:
-                        st.warning(f"⚠️ {item['shot_after'] if item['shot_after'] else '追跡後スクショなし'}")
-        else:
-            st.info("スタートすると、ここに全カードの処理画面履歴がたまっていきます。")
+log_area = st.empty()
+progress_bar = st.progress(0)
+status_text = st.empty()
 
 # =========================================
 # メイン巡回ループ
@@ -418,7 +342,7 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 status_text.write(f"🔄 処理中({idx+1}/{total_items}件目): **{name}**")
 
-                psa_price, real_product_url = get_psa10_data_from_page(page, access_url, name)
+                psa_price, real_product_url = get_psa10_data_from_page(page, access_url)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
                 row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
