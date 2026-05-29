@@ -220,3 +220,111 @@ if st.session_state.running:
             f"&itemConditions=brand_new"
             f"&itemSizes=quantity_1"
             f"&page={current_page}"
+        )
+
+        try:
+            res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
+        except Exception as e:
+            st.error(f"❌ 一覧取得で通信エラーが発生しました(Page {current_page}): {e}")
+            st.session_state.running = False
+            break
+
+        if res.status_code == 404:
+            st.success(f"🎉 最終ページに到達したため、全巡回を完了しました！（最終: {current_page-1}ページ）")
+            st.session_state.current_page = 1
+            st.session_state.running = False
+            break
+        elif res.status_code != 200:
+            st.error(f"❌ ページの取得に失敗しました。Status: {res.status_code}")
+            st.session_state.running = False
+            break
+
+        matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
+
+        if not matches:
+            st.success(f"🎉 商品が見つからなくなったため、全ページの巡回を完了しました！（合計: {current_page-1}ページ走破）")
+            st.session_state.current_page = 1
+            st.session_state.running = False
+            break
+
+        # 1ページ最大30商品制限
+        matches = matches[:30]
+
+        new_rows = []
+        total_items = len(matches)
+
+        # 1ページ分を一気に回すため、ブラウザをここで起動
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            context = browser.new_context(
+                user_agent=SPOOFED_HEADERS["User-Agent"],
+                viewport={"width": 1280, "height": 800},
+                locale="ja-JP"
+            )
+            page = context.new_page()
+
+            for idx, match in enumerate(matches):
+                if not st.session_state.running:
+                    break
+
+                href = match[0]
+                
+                # タイトルの不要な文字列の削除と「&amp;」の置換処理
+                raw_name = match[1].strip()
+                name = raw_name.replace("ポケモンカードゲーム", "").replace("&amp;", "&").strip()
+
+                # 商品IDの抽出
+                id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
+                if not id_match:
+                    continue
+                
+                card_id = id_match.group(1)
+                access_url = f"https://snkrdunk.com/apparels/{card_id}"
+                
+                if name in processed_in_this_run:
+                    continue
+                processed_in_this_run.add(name)
+
+                progress_bar.progress((idx + 1) / total_items)
+                log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
+
+                # 単価計算を含んだスクレイピング処理の実行
+                unit_median_price, real_product_url = get_box_data_from_page(page, access_url)
+                
+                now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
+                row_data = [name, unit_median_price, now_str, real_product_url]
+
+                # Googleスプレッドシート重複・キャッシュチェック
+                if name in box_map:
+                    row_num = box_map[name]["row_num"]
+                    sheet.update(f"A{row_num}:D{row_num}", [row_data])
+                    st.toast(f"✏️ 【上書き更新】{name} -> 1個あたり ¥{unit_median_price}")
+                else:
+                    # 新規追加データをリストに追加
+                    new_rows.append(row_data)
+                    st.toast(f"➕ 【新規追加】{name} -> 1個あたり ¥{unit_median_price}")
+                    
+                    # キャッシュ位置ズレ対策
+                    current_total_rows += 1
+                    box_map[name] = {"row_num": current_total_rows}
+
+                time.sleep(random.uniform(2.5, 4.0))
+
+            browser.close() # 1ページ（30件）終わったらブラウザを安全に終了
+
+        # 新規取得データの一括挿入
+        if new_rows and st.session_state.running:
+            sheet.append_rows(new_rows)
+
+        if st.session_state.running:
+            st.session_state.current_page += 1  # ページカウントを進める
+            time.sleep(3.5)
+        else:
+            st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
+            break
+
+    st.session_state.running = False
+    st.rerun()
