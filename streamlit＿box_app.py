@@ -78,11 +78,11 @@ def get_sheet():
         return sheet
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（履歴読み込み待ち強化版）
+# 価格＆開いたページのURL取得ロジック（カンマなしバグ完全対策版）
 # =========================================
 
 def get_box_data_from_page(page, product_url):
-    """1個あたりの価格を算出して直近6件の中央値を返す（履歴ロード待ちを追加）"""
+    """1個あたりの価格を算出して直近6件の中央値を返す（ロード待ち＋数字抽出を極限強化）"""
     target_median = "なし"
     final_url = product_url
 
@@ -103,11 +103,10 @@ def get_box_data_from_page(page, product_url):
         """)
         time.sleep(0.3)
 
-        # 【対策】非同期で読み込まれる売買履歴のリスト(li)が登場するまで最大15秒待つ
+        # 【対策1】非同期で読み込まれる売買履歴のリスト(li)が登場するまで最大15秒待つ
         try:
             page.wait_for_selector("ul.sales-history.item-list li", timeout=15000)
         except Exception:
-            # 万が一タイムアウトした場合は、その時点のHTMLで処理を進める
             pass
 
         html = page.content()
@@ -117,22 +116,28 @@ def get_box_data_from_page(page, product_url):
 
         for item in history_items:
             size_elem = item.select_one("p.size")    # 例: "2個" "10個"
-            price_elem = item.select_one("p.price")  # 例: "¥54,200"
+            price_elem = item.select_one("p.price")  # 例: "¥54,200" または カンマのない "¥30000"
 
             if size_elem and price_elem:
                 size_text = size_elem.get_text(strip=True)
                 price_text = price_elem.get_text(strip=True)
 
-                # 数値だけを抽出
                 try:
-                    count = int(re.sub(r"[^\d]", "", size_text))
-                    total_price = int(re.sub(r"[^\d]", "", price_text))
+                    # 【対策2】文字列から純粋な「数字」だけを1文字ずつ抽出して結合（カンマ有無の影響を完全回避）
+                    clean_size = "".join([c for c in size_text if c.isdigit()])
+                    clean_price = "".join([c for c in price_text if c.isdigit()])
+                    
+                    if not clean_size or not clean_price:
+                        continue
+                        
+                    count = int(clean_size)
+                    total_price = int(clean_price)
                     
                     if count > 0:
-                        # 1個あたりの価格を計算（端数切り捨てでint型へ変換）
+                        # 1個あたりの価格を計算（端数切り捨て）
                         unit_price = int(total_price / count)
                         unit_prices.append(unit_price)
-                except ValueError:
+                except Exception:
                     continue
 
         if unit_prices:
@@ -272,7 +277,7 @@ if st.session_state.running:
 
                 href = match[0]
                 
-                # タイトルの不要な文字列の削除と「&amp;」の置換処理
+                # タイトルの不要な文字列「ポケモンカードゲーム」の削除と「&amp;」の置換処理
                 raw_name = match[1].strip()
                 name = raw_name.replace("ポケモンカードゲーム", "").replace("&amp;", "&").strip()
 
