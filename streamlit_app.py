@@ -111,11 +111,11 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック
+# 価格＆開いたページのURL取得ロジック（超安定化版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """スクロール追跡と同期ウェイトを行い、PSA10のデータを確実に取得する"""
+    """表記揺れやHTML構造変化に負けない予備ロジック付きの最強巡回スクリプト"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
@@ -124,9 +124,9 @@ def get_psa10_data_from_page(page, product_url):
         # 確実にページ遷移を待機
         page.goto(history_url, wait_until="load", timeout=45000)
         page.wait_for_load_state("domcontentloaded")
-        time.sleep(1.5)
+        time.sleep(2.0)
 
-        # Buyeeポップアップの消去
+        # Buyeeポップアップ等の消去
         try:
             page.evaluate("""
                 () => {
@@ -140,61 +140,92 @@ def get_psa10_data_from_page(page, product_url):
         except:
             pass
 
-        # 「状態PSA10の売買履歴」の見出しがあるかスクロールしながら追跡
-        for i in range(12):  
+        # 表記揺れ（「状態10」「状態PSA10」等）に対応したスクロール＆追跡アルゴリズム
+        for i in range(15):  # 走査範囲を少し拡大
+            # 見出しに「10」が含まれる要素があるか判定（正規表現で柔軟にマッチング）
             h2_exists = page.evaluate("""
                 () => {
-                    const headings = Array.from(document.querySelectorAll('h2.size-title'));
-                    return headings.some(h => h.textContent.includes('状態PSA10の売買履歴'));
+                    const headings = Array.from(document.querySelectorAll('h2'));
+                    return headings.some(h => /.*10.*/.test(h.textContent));
                 }
             """)
             
             if h2_exists:
                 try:
-                    # 見つかったらフォーカスして微調整
-                    locator = page.locator("h2.size-title:has-text('状態PSA10の売買履歴')")
-                    locator.scroll_into_view_if_needed()
-                    time.sleep(0.5)
+                    # 見つかった「10」を含む見出し要素の場所までスクロール
+                    page.evaluate("""
+                        () => {
+                            const headings = Array.from(document.querySelectorAll('h2'));
+                            const target = headings.find(h => /.*10.*/.test(h.textContent));
+                            if (target) { target.scrollIntoView(); }
+                        }
+                    """)
+                    time.sleep(1.0)
                     
-                    # リスト内の実際の要素が描画されるまで最大5秒待つ
-                    page.wait_for_selector("ul.sales-history.item-list li.used", timeout=5000)
+                    # リスト要素が描画されるまで最大5秒待機（クラス名がぶれても良いように広く指定）
+                    page.wait_for_selector("ul.sales-history li", timeout=5000)
                     time.sleep(0.5)
                 except:
                     pass
                 break
             
-            # 見つからなければ少しずつ下へスクロール
-            page.evaluate("window.scrollBy(0, 600)")
-            time.sleep(0.8)
+            # 見つからなければ下へスクロールして読み込みを促す
+            page.evaluate("window.scrollBy(0, 500)")
+            time.sleep(0.6)
+
+        # 最終スクロールを行い、描画の完全着地を待つ
+        page.evaluate("window.scrollBy(0, 200)")
+        time.sleep(1.0)
 
         # 解析処理
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
         
-        h2_tags = soup.find_all("h2", class_="size-title")
+        # --- メインロジック: 「10」を含む見出しの次のリストから抽出 ---
+        h2_tags = soup.find_all(["h2", "div"], class_=lambda x: x and 'title' in x)
+        # クラス名がない場合も考慮してすべてのh2も対象にする
+        if not h2_tags:
+            h2_tags = soup.find_all("h2")
+            
         psa10_ul = None
-        
         for h2 in h2_tags:
-            if "状態PSA10の売買履歴" in h2.get_text():
-                # class名に「item-list」を含むulを確実に探す
-                psa10_ul = h2.find_next("ul", class_=lambda x: x and 'sales-history' in x and 'item-list' in x)
+            if re.search(r'10', h2.get_text()):
+                psa10_ul = h2.find_next("ul", class_=lambda x: x and 'sales-history' in x)
                 break
         
         if psa10_ul:
-            history_items = psa10_ul.select("li.used")
+            history_items = psa10_ul.select("li")
             for item in history_items:
-                size_elem = item.select_one("p.size")
-                price_elem = item.select_one("p.price")
+                size_elem = item.select_one("p[class*='size'], p.size")
+                price_elem = item.select_one("p[class*='price'], p.price")
 
                 if size_elem and price_elem:
                     size_text = size_elem.get_text(strip=True)
                     price_text = price_elem.get_text(strip=True)
 
-                    if "PSA10" in size_text:
-                        clean_price = int(re.sub(r"[^\d]", "", price_text))
-                        psa10_prices.append(clean_price)
+                    if "10" in size_text:  # 「PSA10」「10」どちらでも通るように変更
+                        if re.sub(r"[^\d]", "", price_text):
+                            clean_price = int(re.sub(r"[^\d]", "", price_text))
+                            psa10_prices.append(clean_price)
 
+        # --- バックアップ（フォールバック）ロジック: 上記で見つからなかった場合、ページ内の全リストから直に「10」を探す ---
+        if not psa10_prices:
+            all_lists = soup.find_all("ul", class_=lambda x: x and 'sales-history' in x)
+            for ul in all_lists:
+                items = ul.select("li")
+                for item in items:
+                    size_elem = item.find("p", class_=lambda x: x and 'size' in x)
+                    price_elem = item.find("p", class_=lambda x: x and 'price' in x)
+                    if size_elem and price_elem:
+                        size_text = size_elem.get_text(strip=True)
+                        price_text = price_elem.get_text(strip=True)
+                        if "10" in size_text and not "状態" in size_text: # ヘッダーの「状態」という文字を除外
+                            digits = re.sub(r"[^\d]", "", price_text)
+                            if digits:
+                                psa10_prices.append(int(digits))
+
+        # 価格決定（直近最大6件の中央値）
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
@@ -208,9 +239,9 @@ def get_psa10_data_from_page(page, product_url):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール")
-st.write("スクロール追跡と要素描画ウェイトにより、PSA10の価格情報をバックグラウンドで安全かつ確実にスキャンします。")
+st.set_page_config(page_title="ポケカ価格自動反映（超安定版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（超安定版）")
+st.write("表記の揺れ（状態10 / PSA10）や、HTMLの構造変化によるすり抜けを防止する予備ロジックを組み込んだ最強安定化版です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
