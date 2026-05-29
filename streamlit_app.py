@@ -111,137 +111,141 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（超安定化版）
+# 価格＆URL取得ロジック（リダイレクト・タブクリック対策版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """表記揺れやHTML構造変化に負けない予備ロジック付きの最強巡回スクリプト"""
+    """個別商品ページへのリダイレクトを阻止し、売買履歴タブを強制発火させるロジック"""
     target_median = "なし"
-    final_url = product_url.split("/sales-histories")[0].split("?")[0]
-    history_url = f"{final_url}/sales-histories?slide=right"
+    
+    # 確実に親の履歴URLを構築
+    clean_url = product_url.split("/used/")[0].split("/sales-histories")[0].split("?")[0]
+    history_url = f"{clean_url}/sales-histories?slide=right"
 
     try:
-        # 確実にページ遷移を待機
-        page.goto(history_url, wait_until="load", timeout=45000)
-        page.wait_for_load_state("domcontentloaded")
-        time.sleep(2.0)
+        # 1. ページ遷移（ネットワークが完全に落ち着くまでしっかり待機）
+        page.goto(history_url, wait_until="networkidle", timeout=45000)
+        time.sleep(2.5)
 
-        # Buyeeポップアップ等の消去
-        try:
-            page.evaluate("""
-                () => {
-                    const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
-                    if (closeBtn) { closeBtn.click(); return; }
-                    const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
-                    if (modal) { modal.remove(); }
+        # 2. 個別個体URL（/used/xxxx）に飛ばされていた場合は、再度履歴URLへ強制引き戻し
+        if "/used/" in page.url:
+            page.goto(history_url, wait_until="load", timeout=30000)
+            time.sleep(2.0)
+
+        # 3. モーダルやポップアップの徹底排除
+        page.evaluate("""
+            () => {
+                const closeSelectors = ['.buyee-bcF-modal-close', '[class*="modal-close"]', '.close-button'];
+                closeSelectors.forEach(s => {
+                    const btn = document.querySelector(s);
+                    if (btn) btn.click();
+                });
+                const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
+                if (modal) modal.remove();
+            }
+        """)
+
+        # 4. 【超重要】非同期で隠れている「売買履歴」タブやボタンをJavaScriptで強制クリック
+        page.evaluate("""
+            () => {
+                // ボタン名に「履歴」や「売買」を含むタブを網羅してクリック発火
+                const tabs = Array.from(document.querySelectorAll('button, li, a, div'));
+                const historyTab = tabs.find(el => /売買履歴|履歴/.test(el.textContent));
+                if (historyTab) {
+                    historyTab.click();
                 }
-            """)
-            time.sleep(0.5)
-        except:
-            pass
+            }
+        """)
+        time.sleep(1.5)
 
-        # 表記揺れ（「状態10」「状態PSA10」等）に対応したスクロール＆追跡アルゴリズム
-        for i in range(15):  # 走査範囲を少し拡大
-            # 見出しに「10」が含まれる要素があるか判定（正規表現で柔軟にマッチング）
+        # 5. 表記揺れ（状態10 / PSA10）を狙った追跡スクロール
+        for i in range(12):
             h2_exists = page.evaluate("""
                 () => {
-                    const headings = Array.from(document.querySelectorAll('h2'));
-                    return headings.some(h => /.*10.*/.test(h.textContent));
+                    const headings = Array.from(document.querySelectorAll('h2, div[class*="title"]'));
+                    return headings.some(h => /10/.test(h.textContent));
                 }
             """)
             
             if h2_exists:
-                try:
-                    # 見つかった「10」を含む見出し要素の場所までスクロール
-                    page.evaluate("""
-                        () => {
-                            const headings = Array.from(document.querySelectorAll('h2'));
-                            const target = headings.find(h => /.*10.*/.test(h.textContent));
-                            if (target) { target.scrollIntoView(); }
-                        }
-                    """)
-                    time.sleep(1.0)
-                    
-                    # リスト要素が描画されるまで最大5秒待機（クラス名がぶれても良いように広く指定）
-                    page.wait_for_selector("ul.sales-history li", timeout=5000)
-                    time.sleep(0.5)
-                except:
-                    pass
+                page.evaluate("""
+                    () => {
+                        const headings = Array.from(document.querySelectorAll('h2, div[class*="title"]'));
+                        const target = headings.find(h => /10/.test(h.textContent));
+                        if (target) target.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    }
+                """)
+                time.sleep(1.5)  # 描画通信ウェイト
                 break
             
-            # 見つからなければ下へスクロールして読み込みを促す
-            page.evaluate("window.scrollBy(0, 500)")
+            page.evaluate("window.scrollBy(0, 450)")
             time.sleep(0.6)
 
-        # 最終スクロールを行い、描画の完全着地を待つ
-        page.evaluate("window.scrollBy(0, 200)")
+        # 念のための最終レンダリング確定ウェイト
+        page.evaluate("window.scrollBy(0, 150)")
         time.sleep(1.0)
 
-        # 解析処理
+        # 6. HTML解析
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
         
-        # --- メインロジック: 「10」を含む見出しの次のリストから抽出 ---
-        h2_tags = soup.find_all(["h2", "div"], class_=lambda x: x and 'title' in x)
-        # クラス名がない場合も考慮してすべてのh2も対象にする
-        if not h2_tags:
-            h2_tags = soup.find_all("h2")
-            
+        # --- メイン：10を含む見出しセクションのリストから取得 ---
+        sections = soup.find_all(["h2", "div", "p"], class_=lambda x: x and ('title' in x or 'hd' in x))
+        if not sections:
+            sections = soup.find_all("h2")
+
         psa10_ul = None
-        for h2 in h2_tags:
-            if re.search(r'10', h2.get_text()):
-                psa10_ul = h2.find_next("ul", class_=lambda x: x and 'sales-history' in x)
-                break
+        for sec in sections:
+            if "10" in sec.get_text():
+                psa10_ul = sec.find_next("ul", class_=lambda x: x and 'sales-history' in x)
+                if psa10_ul:
+                    break
         
         if psa10_ul:
-            history_items = psa10_ul.select("li")
-            for item in history_items:
+            for item in psa10_ul.select("li"):
                 size_elem = item.select_one("p[class*='size'], p.size")
                 price_elem = item.select_one("p[class*='price'], p.price")
-
                 if size_elem and price_elem:
                     size_text = size_elem.get_text(strip=True)
                     price_text = price_elem.get_text(strip=True)
+                    if "10" in size_text:
+                        digits = re.sub(r"[^\d]", "", price_text)
+                        if digits:
+                            psa10_prices.append(int(digits))
 
-                    if "10" in size_text:  # 「PSA10」「10」どちらでも通るように変更
-                        if re.sub(r"[^\d]", "", price_text):
-                            clean_price = int(re.sub(r"[^\d]", "", price_text))
-                            psa10_prices.append(clean_price)
-
-        # --- バックアップ（フォールバック）ロジック: 上記で見つからなかった場合、ページ内の全リストから直に「10」を探す ---
+        # --- バックアップ：見出し構造が変わっていてもページ内の全リストから「10」を全回収 ---
         if not psa10_prices:
-            all_lists = soup.find_all("ul", class_=lambda x: x and 'sales-history' in x)
-            for ul in all_lists:
-                items = ul.select("li")
-                for item in items:
+            all_uls = soup.find_all("ul", class_=lambda x: x and 'sales-history' in x)
+            for ul in all_uls:
+                for item in ul.select("li"):
                     size_elem = item.find("p", class_=lambda x: x and 'size' in x)
                     price_elem = item.find("p", class_=lambda x: x and 'price' in x)
                     if size_elem and price_elem:
                         size_text = size_elem.get_text(strip=True)
                         price_text = price_elem.get_text(strip=True)
-                        if "10" in size_text and not "状態" in size_text: # ヘッダーの「状態」という文字を除外
+                        if "10" in size_text and not "状態" in size_text:
                             digits = re.sub(r"[^\d]", "", price_text)
                             if digits:
                                 psa10_prices.append(int(digits))
 
-        # 価格決定（直近最大6件の中央値）
+        # 中央値算出
         if psa10_prices:
-            recent_6_prices = psa10_prices[:6]
-            target_median = int(median(recent_6_prices))
+            recent_6 = psa10_prices[:6]
+            target_median = int(median(recent_6))
 
     except Exception as e:
         pass
 
-    return target_median, final_url
+    return target_median, clean_url
 
 # =========================================
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（超安定版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（超安定版）")
-st.write("表記の揺れ（状態10 / PSA10）や、HTMLの構造変化によるすり抜けを防止する予備ロジックを組み込んだ最強安定化版です。")
+st.set_page_config(page_title="ポケカ価格自動反映（構造追従版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（構造追従版）")
+st.write("中古個別ページへの強制リダイレクトを自動検知し、非同期の売買履歴タブをプログラムが直接クリックして強制抽出し直す最新版です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -267,7 +271,7 @@ with col3:
 
 if stop_button:
     st.session_state.running = False
-    st.warning("🛑 停止要請を受け付けました。現在のページの同期完了後に安全に停止します...")
+    st.warning("🛑 停止要請を受け付けました。安全に停止します...")
     st.rerun()
 
 log_area = st.empty()
@@ -394,7 +398,7 @@ if st.session_state.running:
                     current_total_rows += 1
                     pokemon_map[run_key] = {"row_num": current_total_rows}
 
-                time.sleep(random.uniform(3.0, 5.0))
+                time.sleep(random.uniform(3.5, 5.5))
 
             browser.close()
 
