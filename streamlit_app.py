@@ -78,7 +78,7 @@ def get_sheet():
         service_account_info["private_key"] = pk
 
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    client = gspread.authorize(creds)
+    client = gspread.authorizecreds(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
     try:
         return workbook.worksheet(SHEET_NAME)
@@ -111,18 +111,19 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（PSA10領域狙い撃ち版）
+# 価格＆開いたページのURL取得ロジック（検証用スクショ付き）
 # =========================================
 
-def get_psa10_data_from_page(page, product_url):
-    """他の状態（状態Dなど）を無視し、『状態PSA10の売買履歴』のリストだけを狙い撃つ"""
+def get_psa10_data_from_page(page, product_url, screenshot_area):
+    """他状態を無視してPSA10を狙い撃ち＋待機処理強化＋ページ確認用スクショ機能"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
 
     try:
+        # 相場専用ページへ移動
         page.goto(history_url, wait_until="networkidle", timeout=45000)
-        time.sleep(1.0)
+        time.sleep(1.5)
 
         # Buyeeポップアップの消去
         page.evaluate("""
@@ -133,213 +134,14 @@ def get_psa10_data_from_page(page, product_url):
                 if (modal) { modal.remove(); }
             }
         """)
-        time.sleep(0.3)
+        time.sleep(0.5)
 
-        html_content = page.content()
-        soup = BeautifulSoup(html_content, "html.parser")
-        psa10_prices = []
-        
-        # 【修正ポイント】「状態PSA10の売買履歴」という見出しを検索
-        h2_tags = soup.find_all("h2", class_="size-title")
-        psa10_ul = None
-        
-        for h2 in h2_tags:
-            if "状態PSA10の売買履歴" in h2.get_text():
-                # 見出しの直後にある ul.sales-history.item-list を取得
-                psa10_ul = h2.find_next("ul", class_="sales-history")
-                break
-        
-        # PSA10専用のリストが見つかった場合のみ解析を実行
-        if psa10_ul:
-            history_items = psa10_ul.select("li")
-            for item in history_items:
-                size_elem = item.select_one("p.size")
-                price_elem = item.select_one("p.price")
-
-                if size_elem and price_elem:
-                    size_text = size_elem.get_text(strip=True)
-                    price_text = price_elem.get_text(strip=True)
-
-                    if "PSA10" in size_text:
-                        clean_price = int(re.sub(r"[^\d]", "", price_text))
-                        psa10_prices.append(clean_price)
-
-        # 直近6件から中央値を算出
-        if psa10_prices:
-            recent_6_prices = psa10_prices[:6]
-            target_median = int(median(recent_6_prices))
-
-    except Exception as e:
-        pass
-
-    return target_median, final_url
-
-# =========================================
-# Streamlit UI & 状態管理
-# =========================================
-
-st.set_page_config(page_title="ポケカ価格自動反映（バグ修正版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（PSA10領域ピンポイント取得版）")
-st.write("他状態（状態D等）の履歴が混在していても、PSA10の履歴だけを確実に選別して中央値を計算します。")
-
-if "running" not in st.session_state:
-    st.session_state.running = False
-if "current_page" not in st.session_state:
-    st.session_state.current_page = 1
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    if st.button("🔄 最初から（1ページ目）更新を開始", type="primary", disabled=st.session_state.running):
-        st.session_state.current_page = 1
-        st.session_state.running = True
-        st.rerun()
-
-with col2:
-    resume_label = f"▶️ 続きから再開（現在: {st.session_state.current_page} ページ目）"
-    if st.button(resume_label, type="secondary", disabled=st.session_state.running or st.session_state.current_page == 1):
-        st.session_state.running = True
-        st.rerun()
-
-with col3:
-    stop_button = st.button("🛑 処理を停止する", type="secondary", disabled=not st.session_state.running)
-
-if stop_button:
-    st.session_state.running = False
-    st.warning("🛑 停止要請を受け付けました。現在のページの同期完了後に安全に停止します...")
-    st.rerun()
-
-# =========================================
-# メイン巡回ループ
-# =========================================
-
-if st.session_state.running:
-    sheet = get_sheet()
-    
-    st.info("📊 最新データを取得するため、Googleシートをスキャン中...")
-    existing_rows = sheet.get_all_values()
-    
-    current_total_rows = len(existing_rows)
-    pokemon_map = {}
-
-    if existing_rows:
-        for idx, row in enumerate(existing_rows[1:], start=2):
-            while len(row) < 7:
-                row.append("")
-            key = f"{row[0]}_{row[1]}_{row[2]}"
-            pokemon_map[key] = {"row_num": idx}
-
-    log_area = st.empty()
-    progress_bar = st.progress(0)
-    
-    processed_in_this_run = set()
-
-    while st.session_state.running:
-        current_page = st.session_state.current_page
-        log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
-        
-        url = (
-            f"https://snkrdunk.com/search?"
-            f"keywords=%E3%83%88%E3%83%AC%E3%82%AB"
-            f"&searchCategoryIds=6%2F33"
-            f"&brandIds=pokemon"
-            f"&page={current_page}"
-        )
-
+        # 【追加】「状態PSA10の売買履歴」の文字がHTML内に出現するまで最大15秒間じっと待つ（読み込み遅延対策）
         try:
-            res = requests.get(url, headers=SPOOFED_HEADERS, timeout=20)
-        except Exception as e:
-            st.error(f"❌ 一覧取得で通信エラーが発生しました(Page {current_page}): {e}")
-            st.session_state.running = False
-            break
+            page.wait_for_selector("h2.size-title:has-text('状態PSA10の売買履歴')", timeout=15000)
+        except:
+            pass # タイムアウトしても次へ進む
 
-        if res.status_code == 404:
-            st.success(f"🎉 全巡回を完了しました！（最終: {current_page-1}ページ）")
-            st.session_state.current_page = 1
-            st.session_state.running = False
-            break
-        elif res.status_code != 200:
-            st.error(f"❌ ページの取得に失敗しました。Status: {res.status_code}")
-            st.session_state.running = False
-            break
-
-        matches = re.findall(r'<a[^>]*href="([^"]+?)"[^>]*aria-label="([^"]+?) - ', res.text)
-
-        if not matches:
-            st.success(f"🎉 全ページの巡回を完了しました！（合計: {current_page-1}ページ走破）")
-            st.session_state.current_page = 1
-            st.session_state.running = False
-            break
-
-        matches = matches[:30]
-        new_rows = []
-        total_items = len(matches)
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            context = browser.new_context(
-                user_agent=SPOOFED_HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 800},
-                locale="ja-JP"
-            )
-            page = context.new_page()
-
-            for idx, match in enumerate(matches):
-                if not st.session_state.running:
-                    break
-
-                href = match[0]
-                full_title = match[1]
-
-                id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
-                if not id_match:
-                    continue
-                
-                card_id = id_match.group(1)
-                access_url = f"https://snkrdunk.com/apparels/{card_id}"
-
-                name, rarity, card_no, pack = parse_title(full_title)
-                
-                run_key = f"{name}_{rarity}_{card_no}"
-                if run_key in processed_in_this_run:
-                    continue
-                processed_in_this_run.add(run_key)
-
-                progress_bar.progress((idx + 1) / total_items)
-                log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
-
-                # 正確になったPSA10抽出処理を走らせる
-                psa_price, real_product_url = get_psa10_data_from_page(page, access_url)
-                
-                now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-                row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
-
-                if run_key in pokemon_map:
-                    row_num = pokemon_map[run_key]["row_num"]
-                    sheet.update(f"A{row_num}:G{row_num}", [row_data])
-                    st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price}")
-                else:
-                    new_rows.append(row_data)
-                    st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
-                    current_total_rows += 1
-                    pokemon_map[run_key] = {"row_num": current_total_rows}
-
-                time.sleep(random.uniform(2.5, 4.0))
-
-            browser.close()
-
-        if new_rows and st.session_state.running:
-            sheet.append_rows(new_rows)
-
-        if st.session_state.running:
-            st.session_state.current_page += 1
-            time.sleep(3.5)
-        else:
-            st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
-            break
-
-    st.session_state.running = False
-    st.rerun()
+        # 【追加】検証用のスクリーンショット撮影（メモリ上に保存してStreamlitに表示）
+        screenshot_bytes = page.screenshot(full_page=False)
+        screenshot_area.image(screenshot_bytes, caption=f"📸 現在のブラウザ目
