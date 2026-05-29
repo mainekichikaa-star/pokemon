@@ -111,7 +111,7 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（クラッシュ対策＋エラー可視化版）
+# 価格＆開いたページのURL取得ロジック（描画遅延バグ修正版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url, card_name):
@@ -152,7 +152,7 @@ def get_psa10_data_from_page(page, product_url, card_name):
 
         # 「状態PSA10の売買履歴」の見出しがあるかスクロールしながら追跡
         found_psa10 = False
-        for i in range(10):  # スクロール回数を少し減らして負荷軽減
+        for i in range(12):  
             h2_exists = page.evaluate("""
                 () => {
                     const headings = Array.from(document.querySelectorAll('h2.size-title'));
@@ -163,18 +163,24 @@ def get_psa10_data_from_page(page, product_url, card_name):
             if h2_exists:
                 try:
                     # 見つかったらフォーカスして微調整
-                    page.locator("h2.size-title:has-text('状態PSA10の売買履歴')").scroll_into_view_if_needed()
+                    locator = page.locator("h2.size-title:has-text('状態PSA10の売買履歴')")
+                    locator.scroll_into_view_if_needed()
                     found_psa10 = True
                     time.sleep(0.5)
-                except:
-                    pass
+                    
+                    # 【重要修正】見出しが見つかった後、リスト内の実際の要素が描画されるまで最大5秒待つ
+                    page.wait_for_selector("ul.sales-history.item-list li.used", timeout=5000)
+                    time.sleep(0.5)
+                except Exception as ex:
+                    # 待機に失敗した場合はエラーログに残す
+                    error_msg = f"PSA10のリスト要素の描画待機に失敗しました: {str(ex)}"
                 break
             
             # 見つからなければ少しずつ下へスクロール
             page.evaluate("window.scrollBy(0, 600)")
             time.sleep(0.8)
 
-        # 2回目の撮影（スクロール処理完了後）
+        # 2回目の撮影（スクロール＆描画待機完了後）
         try:
             shot_after = page.screenshot(full_page=False, timeout=5000)
         except Exception as e:
@@ -190,11 +196,12 @@ def get_psa10_data_from_page(page, product_url, card_name):
         
         for h2 in h2_tags:
             if "状態PSA10の売買履歴" in h2.get_text():
-                psa10_ul = h2.find_next("ul", class_="sales-history")
+                # class名に「item-list」を含むulを確実に探す
+                psa10_ul = h2.find_next("ul", class_=lambda x: x and 'sales-history' in x and 'item-list' in x)
                 break
         
         if psa10_ul:
-            history_items = psa10_ul.select("li")
+            history_items = psa10_ul.select("li.used")
             for item in history_items:
                 size_elem = item.select_one("p.size")
                 price_elem = item.select_one("p.price")
@@ -210,11 +217,13 @@ def get_psa10_data_from_page(page, product_url, card_name):
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
+            error_msg = "" # 成功した場合はエラーメッセージをクリア
         else:
-            if not found_psa10:
-                error_msg = "ページ内に「状態PSA10の売買履歴」の見出し自体が見つかりませんでした。"
-            else:
-                error_msg = "PSA10の見出しはありましたが、リスト内に実際の売買データが空でした。"
+            if not error_msg: # 既に待機エラーなどが起きていない場合のみ上書き
+                if not found_psa10:
+                    error_msg = "ページ内に「状態PSA10の売買履歴」の見出し自体が見つかりませんでした。"
+                else:
+                    error_msg = "PSA10の見出しはありましたが、リスト内の実際の売買データがHTML取得時点で空でした（同期ズレ）。"
 
     except Exception as e:
         error_msg = f"ブラウザ処理中に致命的エラーが発生: {str(e)}"
@@ -239,9 +248,9 @@ def get_psa10_data_from_page(page, product_url, card_name):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（クラッシュ対策版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（クラッシュバグ修正版）")
-st.write("Playwrightのフリーズ・強制終了対策を行いました。失敗した場合は枠内に具体的なエラー理由が表示されます。")
+st.set_page_config(page_title="ポケカ価格自動反映（同期バグ修正版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（描画遅延バグ修正版）")
+st.write("スクロール後のデータ描画待ちを強化し、HTMLから確実に売買データを抽出できるように修正しました。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -292,7 +301,9 @@ with side_col:
                 st.markdown(f"結果価格: `¥{item['price']}`  |  [対象URL]({item['url']})")
                 
                 if item["error"]:
-                    st.error(f"❌ 検出ログ: {item['error']}")
+                    st.error(f"❌ {item['error']}")
+                else:
+                    st.success("✅ 正常にデータを取得できました")
                 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -415,10 +426,16 @@ if st.session_state.running:
                 if run_key in pokemon_map:
                     row_num = pokemon_map[run_key]["row_num"]
                     sheet.update(f"A{row_num}:G{row_num}", [row_data])
-                    st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price}")
+                    if psa_price != "なし":
+                        st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price:,}")
+                    else:
+                        st.toast(f"✏️ 【上書き更新】{name} -> 価格データなし")
                 else:
                     new_rows.append(row_data)
-                    st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price}")
+                    if psa_price != "なし":
+                        st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price:,}")
+                    else:
+                        st.toast(f"➕ 【新規追加】{name} -> 価格データなし")
                     current_total_rows += 1
                     pokemon_map[run_key] = {"row_num": current_total_rows}
 
