@@ -341,7 +341,11 @@ if st.session_state.running:
             while len(row) < 7:
                 row.append("")
             key = f"{row[0]}_{row[1]}_{row[2]}"
-            pokemon_map[key] = {"row_num": idx}
+            # 既存の記述価格を保持しておくためのプロパティを追加
+            pokemon_map[key] = {
+                "row_num": idx,
+                "old_price": row[4] if idx <= len(existing_rows) else ""
+            }
     
     processed_in_this_run = set()
 
@@ -425,23 +429,34 @@ if st.session_state.running:
                 psa_price, real_product_url = get_psa10_data_from_page(page, access_url)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
-                row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
 
                 if run_key in pokemon_map:
                     row_num = pokemon_map[run_key]["row_num"]
-                    sheet.update(f"A{row_num}:G{row_num}", [row_data])
-                    if psa_price != "なし":
-                        st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price:,}")
+                    old_price = pokemon_map[run_key]["old_price"]
+                    
+                    # 今回の取得結果が「なし」で、かつ過去に有効な数値（「なし」や空欄以外）が入っていれば上書きをスキップ
+                    if psa_price == "なし" and old_price not in ["なし", "", None]:
+                        st.toast(f"⚠️ 【維持】{name} の現在の価格が「なし」のため、既存の価格（¥{old_price}）を保護しました")
                     else:
-                        st.toast(f"✏️ 【上書き更新】{name} -> 価格データなし")
+                        # 正常な価格取得、または元々価格がない場合は更新
+                        row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
+                        sheet.update(f"A{row_num}:G{row_num}", [row_data])
+                        # 新しい価格状態をキャッシュに反映
+                        pokemon_map[run_key]["old_price"] = psa_price
+                        
+                        if psa_price != "なし":
+                            st.toast(f"✏️ 【上書き更新】{name} -> ¥{psa_price:,}")
+                        else:
+                            st.toast(f"✏️ 【上書き更新】{name} -> 価格データなし")
                 else:
+                    row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
                     new_rows.append(row_data)
                     if psa_price != "なし":
                         st.toast(f"➕ 【新規追加】{name} -> ¥{psa_price:,}")
                     else:
                         st.toast(f"➕ 【新規追加】{name} -> 価格データなし")
                     current_total_rows += 1
-                    pokemon_map[run_key] = {"row_num": current_total_rows}
+                    pokemon_map[run_key] = {"row_num": current_total_rows, "old_price": psa_price}
 
                 time.sleep(random.uniform(3.0, 5.0))
 
