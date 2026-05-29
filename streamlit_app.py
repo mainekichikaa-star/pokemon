@@ -111,44 +111,48 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（スクロール追跡強化版）
+# 価格＆開いたページのURL取得ロジック（クラッシュ対策＋エラー可視化版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url, card_name):
-    """他状態の長さに負けないよう、スクロールしながらPSA10の要素を追跡する"""
+    """他状態の長さに負けないよう、スクロールしながらPSA10の要素を追跡する（安定化版）"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
     
     shot_before = None
     shot_after = None
+    error_msg = ""
 
     try:
-        # 相場専用ページへ移動
-        page.goto(history_url, wait_until="networkidle", timeout=45000)
-        time.sleep(1.0)
+        # 確実にページ遷移を待機
+        page.goto(history_url, wait_until="load", timeout=45000)
+        page.wait_for_load_state("domcontentloaded")
+        time.sleep(1.5)
 
         # Buyeeポップアップの消去
-        page.evaluate("""
-            () => {
-                const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
-                if (closeBtn) { closeBtn.click(); return; }
-                const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
-                if (modal) { modal.remove(); }
-            }
-        """)
-        time.sleep(0.5)
-
-        # 1回目の撮影（アクセス＆ポップアップ処理直後）
         try:
-            shot_before = page.screenshot(full_page=False)
+            page.evaluate("""
+                () => {
+                    const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
+                    if (closeBtn) { closeBtn.click(); return; }
+                    const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
+                    if (modal) { modal.remove(); }
+                }
+            """)
+            time.sleep(0.5)
         except:
             pass
 
-        # 【重要】「状態PSA10の売買履歴」の文字が見つかるまで、少しずつ下にスクロールしながら探す
+        # 1回目の撮影（アクセス＆ポップアップ処理直後）
+        try:
+            shot_before = page.screenshot(full_page=False, timeout=5000)
+        except Exception as e:
+            shot_before = f"直後スクショ撮影エラー: {str(e)}"
+
+        # 「状態PSA10の売買履歴」の見出しがあるかスクロールしながら追跡
         found_psa10 = False
-        for _ in range(15):  # 最大15回、少しずつ下にスクロール
-            # ページ内に「状態PSA10の売買履歴」という見出しがあるかチェック
+        for i in range(10):  # スクロール回数を少し減らして負荷軽減
             h2_exists = page.evaluate("""
                 () => {
                     const headings = Array.from(document.querySelectorAll('h2.size-title'));
@@ -157,29 +161,30 @@ def get_psa10_data_from_page(page, product_url, card_name):
             """)
             
             if h2_exists:
-                # 見つかったら、その要素が画面に見える位置までスクロールさせる
                 try:
+                    # 見つかったらフォーカスして微調整
                     page.locator("h2.size-title:has-text('状態PSA10の売買履歴')").scroll_into_view_if_needed()
                     found_psa10 = True
+                    time.sleep(0.5)
                 except:
                     pass
                 break
             
-            # まだ見つからなければ、1画面分の半分（500px）ずつ下にスクロールして遅延読み込みを発生させる
-            page.evaluate("window.scrollBy(0, 500)")
-            time.sleep(0.6)  # 読み込みを待つための微小バッファ
+            # 見つからなければ少しずつ下へスクロール
+            page.evaluate("window.scrollBy(0, 600)")
+            time.sleep(0.8)
 
-        # 2回目の撮影（スクロール追跡完了後、PSA10が画面に捉えられているはずのタイミング）
+        # 2回目の撮影（スクロール処理完了後）
         try:
-            shot_after = page.screenshot(full_page=False)
-        except:
-            pass
+            shot_after = page.screenshot(full_page=False, timeout=5000)
+        except Exception as e:
+            shot_after = f"追跡後スクショ撮影エラー: {str(e)}"
 
+        # 解析処理
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
         
-        # 「状態PSA10の売買履歴」という見出しをピンポイント検索
         h2_tags = soup.find_all("h2", class_="size-title")
         psa10_ul = None
         
@@ -205,9 +210,14 @@ def get_psa10_data_from_page(page, product_url, card_name):
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
+        else:
+            if not found_psa10:
+                error_msg = "ページ内に「状態PSA10の売買履歴」の見出し自体が見つかりませんでした。"
+            else:
+                error_msg = "PSA10の見出しはありましたが、リスト内に実際の売買データが空でした。"
 
     except Exception as e:
-        pass
+        error_msg = f"ブラウザ処理中に致命的エラーが発生: {str(e)}"
 
     # セッション状態にスクショ履歴を追加保存
     if "screenshot_history" not in st.session_state:
@@ -219,6 +229,7 @@ def get_psa10_data_from_page(page, product_url, card_name):
         "price": target_median,
         "shot_before": shot_before,
         "shot_after": shot_after,
+        "error": error_msg,
         "time": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M:%S")
     })
 
@@ -228,9 +239,9 @@ def get_psa10_data_from_page(page, product_url, card_name):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（スクロール追跡版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（スクロール追跡版）")
-st.write("ページ下部にあるPSA10の売買履歴を自動で追跡・スクロールして確実に取得するよう改善しました。")
+st.set_page_config(page_title="ポケカ価格自動反映（クラッシュ対策版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（クラッシュバグ修正版）")
+st.write("Playwrightのフリーズ・強制終了対策を行いました。失敗した場合は枠内に具体的なエラー理由が表示されます。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -239,7 +250,6 @@ if "current_page" not in st.session_state:
 if "screenshot_history" not in st.session_state:
     st.session_state.screenshot_history = []
 
-# 【修正箇所】タイポを修正して正しく3分割しました
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -281,17 +291,20 @@ with side_col:
                 st.markdown(f"**【{item['time']}】 {item['name']}**")
                 st.markdown(f"結果価格: `¥{item['price']}`  |  [対象URL]({item['url']})")
                 
+                if item["error"]:
+                    st.error(f"❌ 検出ログ: {item['error']}")
+                
                 c1, c2 = st.columns(2)
                 with c1:
-                    if item['shot_before']:
+                    if item['shot_before'] and isinstance(item['shot_before'], bytes):
                         st.image(item['shot_before'], caption="📸 開いてすぐ", use_container_width=True)
                     else:
-                        st.write("⚠️ 直後スクショなし")
+                        st.warning(f"⚠️ {item['shot_before'] if item['shot_before'] else '直後スクショなし'}")
                 with c2:
-                    if item['shot_after']:
+                    if item['shot_after'] and isinstance(item['shot_after'], bytes):
                         st.image(item['shot_after'], caption="📸 PSA10追跡スクロール後", use_container_width=True)
                     else:
-                        st.write("⚠️ 追跡後スクショなし")
+                        st.warning(f"⚠️ {item['shot_after'] if item['shot_after'] else '追跡後スクショなし'}")
         else:
             st.info("スタートすると、ここに全カードの処理画面履歴がたまっていきます。")
 
