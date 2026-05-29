@@ -111,22 +111,20 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（超安定化版）
+# 価格＆開いたページのURL取得ロジック（統合版）
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """表記揺れやHTML構造変化に負けない予備ロジック付きの最強巡回スクリプト"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
 
+    # 1. コード1のロジックを試行
     try:
-        # 確実にページ遷移を待機
         page.goto(history_url, wait_until="load", timeout=45000)
         page.wait_for_load_state("domcontentloaded")
         time.sleep(2.0)
 
-        # Buyeeポップアップ等の消去
         try:
             page.evaluate("""
                 () => {
@@ -140,9 +138,7 @@ def get_psa10_data_from_page(page, product_url):
         except:
             pass
 
-        # 表記揺れ（「状態10」「状態PSA10」等）に対応したスクロール＆追跡アルゴリズム
-        for i in range(15):  # 走査範囲を少し拡大
-            # 見出しに「10」が含まれる要素があるか判定（正規表現で柔軟にマッチング）
+        for i in range(15):
             h2_exists = page.evaluate("""
                 () => {
                     const headings = Array.from(document.querySelectorAll('h2'));
@@ -152,7 +148,6 @@ def get_psa10_data_from_page(page, product_url):
             
             if h2_exists:
                 try:
-                    # 見つかった「10」を含む見出し要素の場所までスクロール
                     page.evaluate("""
                         () => {
                             const headings = Array.from(document.querySelectorAll('h2'));
@@ -162,29 +157,23 @@ def get_psa10_data_from_page(page, product_url):
                     """)
                     time.sleep(1.0)
                     
-                    # リスト要素が描画されるまで最大5秒待機（クラス名がぶれても良いように広く指定）
                     page.wait_for_selector("ul.sales-history li", timeout=5000)
                     time.sleep(0.5)
                 except:
                     pass
                 break
             
-            # 見つからなければ下へスクロールして読み込みを促す
             page.evaluate("window.scrollBy(0, 500)")
             time.sleep(0.6)
 
-        # 最終スクロールを行い、描画の完全着地を待つ
         page.evaluate("window.scrollBy(0, 200)")
         time.sleep(1.0)
 
-        # 解析処理
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         psa10_prices = []
         
-        # --- メインロジック: 「10」を含む見出しの次のリストから抽出 ---
         h2_tags = soup.find_all(["h2", "div"], class_=lambda x: x and 'title' in x)
-        # クラス名がない場合も考慮してすべてのh2も対象にする
         if not h2_tags:
             h2_tags = soup.find_all("h2")
             
@@ -204,12 +193,11 @@ def get_psa10_data_from_page(page, product_url):
                     size_text = size_elem.get_text(strip=True)
                     price_text = price_elem.get_text(strip=True)
 
-                    if "10" in size_text:  # 「PSA10」「10」どちらでも通るように変更
+                    if "10" in size_text:
                         if re.sub(r"[^\d]", "", price_text):
                             clean_price = int(re.sub(r"[^\d]", "", price_text))
                             psa10_prices.append(clean_price)
 
-        # --- バックアップ（フォールバック）ロジック: 上記で見つからなかった場合、ページ内の全リストから直に「10」を探す ---
         if not psa10_prices:
             all_lists = soup.find_all("ul", class_=lambda x: x and 'sales-history' in x)
             for ul in all_lists:
@@ -220,18 +208,64 @@ def get_psa10_data_from_page(page, product_url):
                     if size_elem and price_elem:
                         size_text = size_elem.get_text(strip=True)
                         price_text = price_elem.get_text(strip=True)
-                        if "10" in size_text and not "状態" in size_text: # ヘッダーの「状態」という文字を除外
+                        if "10" in size_text and not "状態" in size_text:
                             digits = re.sub(r"[^\d]", "", price_text)
                             if digits:
                                 psa10_prices.append(int(digits))
 
-        # 価格決定（直近最大6件の中央値）
         if psa10_prices:
             recent_6_prices = psa10_prices[:6]
             target_median = int(median(recent_6_prices))
 
     except Exception as e:
         pass
+
+    # 2. コード1で価格が取得できなかった場合、コード2のロジックを試行
+    if target_median == "なし":
+        try:
+            page.goto(product_url, wait_until="networkidle", timeout=45000)
+            time.sleep(1.0)
+
+            final_url = page.url.split("/sales-histories")[0].split("?")[0]
+
+            page.evaluate("""
+                () => {
+                    const closeBtn = document.querySelector('.buyee-bcF-modal-close') || document.querySelector('[class*="modal-close"]');
+                    if (closeBtn) { closeBtn.click(); return; }
+                    const modal = document.getElementById('buyee-bcSection') || document.querySelector('.buyee-bcF-modal');
+                    if (modal) { modal.remove(); }
+                }
+            """)
+            time.sleep(0.3)
+
+            psa10_label = page.locator("label:has-text('PSA10')")
+            if psa10_label.count() > 0:
+                psa10_label.first.click(force=True)
+                time.sleep(1.2)
+
+            html_content_2 = page.content()
+            soup_2 = BeautifulSoup(html_content_2, "html.parser")
+            psa10_prices_2 = []
+            history_items_2 = soup_2.select("ul.sales-history.item-list li")
+
+            for item in history_items_2:
+                size_elem = item.select_one("p.size")
+                price_elem = item.select_one("p.price")
+
+                if size_elem and price_elem:
+                    size_text = size_elem.get_text(strip=True)
+                    price_text = price_elem.get_text(strip=True)
+
+                    if "PSA10" in size_text:
+                        clean_price = int(re.sub(r"[^\d]", "", price_text))
+                        psa10_prices_2.append(clean_price)
+
+            if psa10_prices_2:
+                recent_6_prices_2 = psa10_prices_2[:6]
+                target_median = int(median(recent_6_prices_2))
+
+        except Exception as e:
+            pass
 
     return target_median, final_url
 
