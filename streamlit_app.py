@@ -111,7 +111,7 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（全履歴スクショ保存版）
+# 価格＆開いたページのURL取得ロジック
 # =========================================
 
 def get_psa10_data_from_page(page, product_url, card_name):
@@ -191,7 +191,7 @@ def get_psa10_data_from_page(page, product_url, card_name):
     except Exception as e:
         pass
 
-    # セッション状態にスクショ履歴を追加保存する
+    # セッション状態にスクショ履歴を追加保存
     if "screenshot_history" not in st.session_state:
         st.session_state.screenshot_history = []
         
@@ -210,9 +210,9 @@ def get_psa10_data_from_page(page, product_url, card_name):
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（全スクショ記録版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（全件スクショ履歴ログ保存版）")
-st.write("処理したすべてのカードのブラウザ画面を下にすべて残していきます。あとから「なし」の原因を完全に追跡可能です。")
+st.set_page_config(page_title="ポケカ価格自動反映（ループバグ修正版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（安定動作版）")
+st.write("ブラウザ動作を妨げるリロードバグを修正しました。スクショ履歴は1ページ（30件）の処理が終わるごとにまとめて出力されます。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -241,22 +241,23 @@ with col3:
 
 if stop_button:
     st.session_state.running = False
-    st.warning("🛑 停止要付け。現在のページの同期完了後に安全に停止します...")
+    st.warning("🛑 停止要請を受け付けました。現在のページの同期完了後に安全に停止します...")
     st.rerun()
 
-# 左右2分割（左：進捗・操作ログ、右：蓄積されるスクショ履歴）
+# 左右2分割
 main_col, side_col = st.columns([1, 1])
 
 with main_col:
     log_area = st.empty()
     progress_bar = st.progress(0)
+    status_text = st.empty()
 
 with side_col:
     st.write("### 📜 走査した全カードのブラウザ画面履歴")
-    # 過去のスクショを新しい順に並べてすべて表示させる領域
     sc_container = st.container()
     with sc_container:
         if st.session_state.screenshot_history:
+            # 蓄積された履歴を表示
             for item in reversed(st.session_state.screenshot_history):
                 st.markdown(f"---")
                 st.markdown(f"**【{item['time']}】 {item['name']}**")
@@ -267,12 +268,12 @@ with side_col:
                     if item['shot_before']:
                         st.image(item['shot_before'], caption="📸 開いた直後", use_container_width=True)
                     else:
-                        st.write("直後スクショ失敗")
+                        st.write("⚠️ 直後スクショなし")
                 with c2:
                     if item['shot_after']:
                         st.image(item['shot_after'], caption="📸 待機・ポップアップ処理後", use_container_width=True)
                     else:
-                        st.write("待機後スクショ失敗")
+                        st.write("⚠️ 待機後スクショなし")
         else:
             st.info("スタートすると、ここに全カードの処理画面履歴がたまっていきます。")
 
@@ -339,6 +340,7 @@ if st.session_state.running:
         new_rows = []
         total_items = len(matches)
 
+        # ページ全体の処理を1つのブラウザセッションで安定実行
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -373,9 +375,9 @@ if st.session_state.running:
                 processed_in_this_run.add(run_key)
 
                 progress_bar.progress((idx + 1) / total_items)
-                log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
+                status_text.write(f"🔄 処理中({idx+1}/{total_items}件目): **{name}**")
 
-                # 進捗と同時に画面にスクショを蓄積保存する
+                # 【修正】ここで途中の st.rerun() を引き起こさないよう安全に処理を完結させる
                 psa_price, real_product_url = get_psa10_data_from_page(page, access_url, name)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
@@ -391,18 +393,18 @@ if st.session_state.running:
                     current_total_rows += 1
                     pokemon_map[run_key] = {"row_num": current_total_rows}
 
-                # 履歴を即座にUI側に再レンダリング反映させるためのトリック
-                st.rerun()
+                time.sleep(random.uniform(3.0, 5.0))
 
             browser.close()
 
+        # 新規取得データをまとめてシートへ追加
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
 
         if st.session_state.running:
             st.session_state.current_page += 1
             time.sleep(3.5)
-            st.rerun()
+            st.rerun()  # 【修正】1ページ分（30件）の処理が完全に終わった段階でリロードをかける
         else:
             st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
             break
