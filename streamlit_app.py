@@ -115,23 +115,15 @@ def parse_title(full_title):
 # =========================================
 
 def get_psa10_data_from_page(page, product_url):
-    """
-    第一優先：コード2のロジック（商品トップでPSA10要素をクリックしてリスト解析）
-    第二優先（フォールバック）：コード1のロジック（/sales-historiesに遷移してスクロール巡回）
-    """
     target_median = "なし"
     final_url = product_url
 
-    # -----------------------------------------
-    # 【ステップ1】コード2の価格取得ロジックを試行
-    # -----------------------------------------
     try:
         page.goto(product_url, wait_until="networkidle", timeout=45000)
         time.sleep(1.0)
 
         final_url = page.url.split("/sales-histories")[0].split("?")[0]
 
-        # Buyeeポップアップの消去処理
         try:
             page.evaluate("""
                 () => {
@@ -145,7 +137,6 @@ def get_psa10_data_from_page(page, product_url):
         except:
             pass
 
-        # 「PSA10」のボタンを強制クリック
         psa10_label = page.locator("label:has-text('PSA10')")
         if psa10_label.count() > 0:
             psa10_label.first.click(force=True)
@@ -175,9 +166,6 @@ def get_psa10_data_from_page(page, product_url):
     except Exception as e:
         pass
 
-    # -----------------------------------------
-    # 【ステップ2】コード2で価格なしの場合、コード1のロジックを試行
-    # -----------------------------------------
     if target_median == "なし":
         history_url = f"{final_url}/sales-histories?slide=right"
         try:
@@ -185,7 +173,6 @@ def get_psa10_data_from_page(page, product_url):
             page.wait_for_load_state("domcontentloaded")
             time.sleep(2.0)
 
-            # Buyeeポップアップ等の消去
             try:
                 page.evaluate("""
                     () => {
@@ -199,7 +186,6 @@ def get_psa10_data_from_page(page, product_url):
             except:
                 pass
 
-            # 表記揺れに対応したスクロール＆追跡アルゴリズム
             for i in range(15):
                 h2_exists = page.evaluate("""
                     () => {
@@ -259,7 +245,6 @@ def get_psa10_data_from_page(page, product_url):
                                 clean_price = int(re.sub(r"[^\d]", "", price_text))
                                 psa10_prices.append(clean_price)
 
-            # バックアップ（フォールバック）ロジック
             if not psa10_prices:
                 all_lists = soup.find_all("ul", class_=lambda x: x and 'sales-history' in x)
                 for ul in all_lists:
@@ -331,22 +316,52 @@ if st.session_state.running:
     sheet = get_sheet()
     
     st.info("📊 最新データを取得するため、Googleシートをスキャン中...")
-    existing_rows = sheet.get_all_values()
+    raw_rows = sheet.get_all_values()
     
-    current_total_rows = len(existing_rows)
     pokemon_map = {}
+    
+    if raw_rows and len(raw_rows) > 1:
+        header = raw_rows[0]
+        data_rows = raw_rows[1:]
+        
+        # 名前(0), 品番(2), 収録パック(3) の組み合わせで重複行を検知し統合する
+        unique_data = {}
+        has_duplicates = False
+        
+        for idx, row in enumerate(data_rows, start=2):
+            while len(row) < 7:
+                row.append("")
+            # 判定キーを「名前_品番_収録パック」に変更
+            key = f"{row[0]}_{row[2]}_{row[3]}"
+            
+            # 既存のキーがある場合は重複（新しいデータで上書き＝行削除が必要）
+            if key in unique_data:
+                has_duplicates = True
+            unique_data[key] = row
 
-    if existing_rows:
+        # 重複が存在した場合はシート側を一旦綺麗にまとめる
+        if has_duplicates:
+            st.warning("🧹 シート内に重複データを検知しました。1つにまとめてクリーンアップしています...")
+            sheet.clear()
+            sheet.append_row(header)
+            if unique_data:
+                sheet.append_rows(list(unique_data.values()))
+            # 再取得してインデックスを正常化
+            existing_rows = sheet.get_all_values()
+        else:
+            existing_rows = raw_rows
+
+        # インデックス構築
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 7:
                 row.append("")
-            key = f"{row[0]}_{row[1]}_{row[2]}"
-            # 既存の記述価格を保持しておくためのプロパティを追加
+            key = f"{row[0]}_{row[2]}_{row[3]}"
             pokemon_map[key] = {
                 "row_num": idx,
-                "old_price": row[4] if idx <= len(existing_rows) else ""
+                "old_price": row[4]
             }
-    
+            
+    current_total_rows = len(sheet.get_all_values())
     processed_in_this_run = set()
 
     while st.session_state.running:
@@ -418,7 +433,8 @@ if st.session_state.running:
 
                 name, rarity, card_no, pack = parse_title(full_title)
                 
-                run_key = f"{name}_{rarity}_{card_no}"
+                # 巡回中の重複排除キーも「名前_品番_収録パック」に変更
+                run_key = f"{name}_{card_no}_{pack}"
                 if run_key in processed_in_this_run:
                     continue
                 processed_in_this_run.add(run_key)
@@ -434,14 +450,11 @@ if st.session_state.running:
                     row_num = pokemon_map[run_key]["row_num"]
                     old_price = pokemon_map[run_key]["old_price"]
                     
-                    # 今回の取得結果が「なし」で、かつ過去に有効な数値（「なし」や空欄以外）が入っていれば上書きをスキップ
                     if psa_price == "なし" and old_price not in ["なし", "", None]:
                         st.toast(f"⚠️ 【維持】{name} の現在の価格が「なし」のため、既存の価格（¥{old_price}）を保護しました")
                     else:
-                        # 正常な価格取得、または元々価格がない場合は更新
                         row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
                         sheet.update(f"A{row_num}:G{row_num}", [row_data])
-                        # 新しい価格状態をキャッシュに反映
                         pokemon_map[run_key]["old_price"] = psa_price
                         
                         if psa_price != "なし":
