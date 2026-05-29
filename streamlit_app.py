@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import requests
 import re
@@ -13,26 +14,25 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================================
-# Playwright自動インストール
+# Playwright install
 # =========================================
 
 @st.cache_resource
-def install_playwright():
+def install_playwright_browsers():
     try:
         subprocess.run(
             ["playwright", "install", "chromium"],
-            check=True,
-            capture_output=True
+            check=True
         )
         return True
     except Exception as e:
-        st.error(f"Playwright install失敗: {e}")
+        st.error(f"Playwrightブラウザのインストール失敗: {e}")
         return False
 
-with st.spinner("Playwright準備中..."):
-    install_playwright()
+with st.spinner("システム準備中..."):
+    install_playwright_browsers()
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 # =========================================
 # 設定
@@ -61,7 +61,7 @@ SPOOFED_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/136.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
 }
@@ -101,7 +101,7 @@ def get_sheet():
     except gspread.exceptions.WorksheetNotFound:
         sheet = workbook.add_worksheet(
             title=SHEET_NAME,
-            rows="10000",
+            rows="1000",
             cols="20"
         )
 
@@ -141,71 +141,56 @@ def parse_title(full_title):
     if rarity_match:
         name = rarity_match.group(1).strip()
         rarity = rarity_match.group(2).strip()
+
     else:
         name = before_bracket
 
     return name, rarity, card_no, pack
 
 # =========================================
-# 広告・モーダル閉じる
+# 広告・ポップアップ除去
 # =========================================
 
-def close_advertisements(page):
+def close_ads_and_popups(page):
 
-    selectors = [
-
-        # Buyee
-        ".buyee-bcF-modal-close",
-        "#buyee-bcSection .buyee-bcF-modal-close",
-
-        # 共通
-        "[class*='close']",
-        "[aria-label='Close']",
-        "[aria-label='閉じる']",
-
-        # Dialog
-        "[role='dialog'] button",
-
-        # SVG閉じる
-        "svg",
-
-        # Modal
-        ".modal-close",
-        ".popup-close",
-        ".close-button",
-
-        # 広告
-        "[class*='ad'] button",
-        "[class*='banner'] button"
+    popup_selectors = [
+        '[aria-label="Close"]',
+        '[aria-label="閉じる"]',
+        '.buyee-bcF-modal-close',
+        '.modal-close',
+        '[class*="close"]',
+        '[class*="Close"]',
+        'button[aria-label*="close"]',
+        'button[aria-label*="閉じ"]',
+        '#buyee-bcSection'
     ]
 
-    for selector in selectors:
-
+    for selector in popup_selectors:
         try:
-
             elements = page.locator(selector)
 
             count = elements.count()
 
-            for i in range(min(count, 10)):
-
+            for i in range(count):
                 try:
                     el = elements.nth(i)
 
-                    if el.is_visible(timeout=300):
+                    if el.is_visible(timeout=1000):
 
-                        try:
-                            el.click(timeout=500)
-                            time.sleep(0.2)
+                        tag_name = el.evaluate("(e) => e.tagName")
 
-                        except:
-                            try:
-                                page.evaluate(
-                                    "(el) => el.click()",
-                                    el
-                                )
-                            except:
-                                pass
+                        if tag_name.lower() == "button":
+                            el.click(timeout=1000)
+
+                        else:
+                            page.evaluate("""
+                                (selector) => {
+                                    const el = document.querySelector(selector);
+                                    if (el) el.remove();
+                                }
+                            """, selector)
+
+                        time.sleep(0.3)
 
                 except:
                     pass
@@ -213,37 +198,32 @@ def close_advertisements(page):
         except:
             pass
 
-    # ESCキー
+    # iframe広告削除
     try:
-        page.keyboard.press("Escape")
+        page.evaluate("""
+            () => {
+
+                const iframes = document.querySelectorAll("iframe");
+
+                iframes.forEach(frame => {
+
+                    const src = frame.src || "";
+
+                    if (
+                        src.includes("ads") ||
+                        src.includes("doubleclick") ||
+                        src.includes("googleads") ||
+                        src.includes("adservice")
+                    ) {
+                        frame.remove();
+                    }
+
+                });
+
+            }
+        """)
     except:
         pass
-
-# =========================================
-# webdriver隠蔽
-# =========================================
-
-def apply_anti_detection(context):
-
-    context.add_init_script("""
-    
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-
-        window.chrome = {
-            runtime: {}
-        };
-
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1,2,3,4,5]
-        });
-
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['ja-JP', 'ja', 'en-US']
-        });
-
-    """)
 
 # =========================================
 # PSA10価格取得
@@ -253,11 +233,7 @@ def get_psa10_data_from_page(page, product_url):
 
     target_median = "なし"
 
-    final_url = (
-        product_url
-        .split("/sales-histories")[0]
-        .split("?")[0]
-    )
+    final_url = product_url.split("/sales-histories")[0].split("?")[0]
 
     history_url = f"{final_url}/sales-histories?slide=right"
 
@@ -271,120 +247,96 @@ def get_psa10_data_from_page(page, product_url):
 
         page.wait_for_load_state("networkidle")
 
-        time.sleep(2)
+        time.sleep(2.5)
 
-        # 広告閉じる
-        for _ in range(5):
-            close_advertisements(page)
-            time.sleep(0.5)
+        # 広告削除
+        close_ads_and_popups(page)
 
-        # 人間っぽい動き
-        for _ in range(4):
+        # ページ全体を読み込ませる
+        for _ in range(12):
 
-            page.mouse.wheel(
-                0,
-                random.randint(500, 1200)
-            )
+            page.mouse.wheel(0, 1500)
 
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(0.8)
 
-            close_advertisements(page)
-
-        # PSA10セクション探索
-        found = False
-
-        for _ in range(15):
-
-            close_advertisements(page)
-
-            psa_exists = page.evaluate("""
-
-                () => {
-
-                    const all = [...document.querySelectorAll("*")];
-
-                    return all.some(el => {
-
-                        const txt = el.innerText || "";
-
-                        return txt.includes("PSA10");
-
-                    });
-
-                }
-
-            """)
-
-            if psa_exists:
-                found = True
-                break
-
-            page.mouse.wheel(0, 1200)
-
-            time.sleep(1)
-
-        if not found:
-            return "なし", final_url
+            close_ads_and_popups(page)
 
         # HTML取得
         html_content = page.content()
 
         soup = BeautifulSoup(html_content, "html.parser")
 
-        text = soup.get_text("\n")
-
-        lines = text.split("\n")
-
         psa10_prices = []
 
-        # PSA10を含む行から価格取得
-        for idx, line in enumerate(lines):
+        # =========================================
+        # PSA10だけ厳密取得
+        # =========================================
 
-            clean = line.strip()
+        all_li = soup.find_all("li")
 
-            if "PSA10" not in clean:
+        for li in all_li:
+
+            text = li.get_text(" ", strip=True)
+
+            # PSA10だけ
+            if not re.search(r'PSA\s*10', text, re.IGNORECASE):
                 continue
 
-            # 周辺20行探索
-            nearby = lines[idx:idx + 20]
+            # 数字取得
+            yen_matches = re.findall(r'¥\s?([\d,]+)', text)
 
-            for nearby_line in nearby:
+            if not yen_matches:
+                yen_matches = re.findall(r'([0-9,]+)\s?円', text)
 
-                nearby_line = nearby_line.strip()
-
-                # ¥12,345
-                price_match = re.search(
-                    r'¥\s?([\d,]+)',
-                    nearby_line
-                )
-
-                if not price_match:
-                    price_match = re.search(
-                        r'([0-9,]{3,})円',
-                        nearby_line
-                    )
-
-                if not price_match:
-                    continue
+            for price in yen_matches:
 
                 try:
 
-                    price = int(
-                        price_match.group(1)
-                        .replace(",", "")
+                    clean_price = int(
+                        re.sub(r"[^\d]", "", price)
                     )
 
-                    # 異常値除外
-                    if 100 <= price <= 10000000:
-                        psa10_prices.append(price)
+                    if clean_price > 100:
+                        psa10_prices.append(clean_price)
 
                 except:
                     pass
 
-        # 重複除去
+        # =========================================
+        # フォールバック
+        # =========================================
+
+        if not psa10_prices:
+
+            sales_lists = soup.select("ul")
+
+            for ul in sales_lists:
+
+                ul_text = ul.get_text(" ", strip=True)
+
+                if "PSA10" not in ul_text.upper():
+                    continue
+
+                prices = re.findall(r'¥\s?([\d,]+)', ul_text)
+
+                for price in prices:
+
+                    try:
+
+                        clean_price = int(
+                            re.sub(r"[^\d]", "", price)
+                        )
+
+                        if clean_price > 100:
+                            psa10_prices.append(clean_price)
+
+                    except:
+                        pass
+
+        # 重複削除
         psa10_prices = list(dict.fromkeys(psa10_prices))
 
-        # 中央値
+        # 直近6件中央値
         if psa10_prices:
 
             recent_prices = psa10_prices[:6]
@@ -393,9 +345,8 @@ def get_psa10_data_from_page(page, product_url):
                 median(recent_prices)
             )
 
-    except Exception as e:
-
-        print("PSA10取得エラー:", e)
+    except Exception:
+        pass
 
     return target_median, final_url
 
@@ -404,11 +355,11 @@ def get_psa10_data_from_page(page, product_url):
 # =========================================
 
 st.set_page_config(
-    page_title="ポケカPSA10価格監視",
+    page_title="ポケカ価格自動反映",
     layout="wide"
 )
 
-st.title("🃏 ポケカ PSA10価格監視")
+st.title("🃏 ポケカ価格自動反映ツール")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -421,7 +372,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
 
     if st.button(
-        "🔄 最初から開始",
+        "🔄 最初から更新開始",
         type="primary",
         disabled=st.session_state.running
     ):
@@ -432,8 +383,13 @@ with col1:
 
 with col2:
 
+    resume_label = (
+        f"▶️ 続きから再開 "
+        f"(現在: {st.session_state.current_page}ページ目)"
+    )
+
     if st.button(
-        f"▶️ 続きから再開 ({st.session_state.current_page}ページ目)",
+        resume_label,
         disabled=st.session_state.running
     ):
 
@@ -442,19 +398,26 @@ with col2:
 
 with col3:
 
-    if st.button(
+    stop_button = st.button(
         "🛑 停止",
         disabled=not st.session_state.running
-    ):
+    )
 
-        st.session_state.running = False
-        st.rerun()
+if stop_button:
+
+    st.session_state.running = False
+
+    st.warning(
+        "🛑 停止要求を受け付けました"
+    )
+
+    st.rerun()
+
+log_area = st.empty()
 
 progress_bar = st.progress(0)
 
 status_text = st.empty()
-
-log_text = st.empty()
 
 # =========================================
 # メイン処理
@@ -466,16 +429,22 @@ if st.session_state.running:
 
     existing_rows = sheet.get_all_values()
 
+    current_total_rows = len(existing_rows)
+
     pokemon_map = {}
 
-    for idx, row in enumerate(existing_rows[1:], start=2):
+    if existing_rows:
 
-        while len(row) < 7:
-            row.append("")
+        for idx, row in enumerate(existing_rows[1:], start=2):
 
-        key = f"{row[0]}_{row[1]}_{row[2]}"
+            while len(row) < 7:
+                row.append("")
 
-        pokemon_map[key] = idx
+            key = f"{row[0]}_{row[1]}_{row[2]}"
+
+            pokemon_map[key] = {
+                "row_num": idx
+            }
 
     processed_in_this_run = set()
 
@@ -483,11 +452,11 @@ if st.session_state.running:
 
         current_page = st.session_state.current_page
 
-        log_text.markdown(
-            f"## 📄 Page {current_page}"
+        log_area.markdown(
+            f"## 📄 ページ {current_page} を解析中..."
         )
 
-        search_url = (
+        url = (
             f"https://snkrdunk.com/search?"
             f"keywords=%E3%83%88%E3%83%AC%E3%82%AB"
             f"&searchCategoryIds=6%2F33"
@@ -498,22 +467,29 @@ if st.session_state.running:
         try:
 
             res = requests.get(
-                search_url,
+                url,
                 headers=SPOOFED_HEADERS,
                 timeout=30
             )
 
         except Exception as e:
 
-            st.error(f"通信失敗: {e}")
+            st.error(
+                f"一覧取得エラー: {e}"
+            )
+
+            st.session_state.running = False
 
             break
 
         if res.status_code == 404:
 
-            st.success("全ページ完了")
+            st.success(
+                f"🎉 全巡回完了"
+            )
 
             st.session_state.running = False
+            st.session_state.current_page = 1
 
             break
 
@@ -524,23 +500,25 @@ if st.session_state.running:
 
         if not matches:
 
-            st.success("巡回完了")
+            st.success(
+                f"🎉 全ページ巡回完了"
+            )
 
             st.session_state.running = False
+            st.session_state.current_page = 1
 
             break
 
         matches = matches[:30]
 
-        updates = []
-        append_rows = []
+        new_rows = []
+
+        total_items = len(matches)
 
         with sync_playwright() as p:
 
             browser = p.chromium.launch(
-
                 headless=True,
-
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
@@ -549,20 +527,21 @@ if st.session_state.running:
             )
 
             context = browser.new_context(
-
                 user_agent=SPOOFED_HEADERS["User-Agent"],
-
                 viewport={
-                    "width": 1366,
-                    "height": 900
+                    "width": 1280,
+                    "height": 1000
                 },
-
                 locale="ja-JP",
-
                 timezone_id="Asia/Tokyo"
             )
 
-            apply_anti_detection(context)
+            # webdriver隠し
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
 
             page = context.new_page()
 
@@ -572,6 +551,7 @@ if st.session_state.running:
                     break
 
                 href = match[0]
+
                 full_title = match[1]
 
                 id_match = re.search(
@@ -590,24 +570,27 @@ if st.session_state.running:
 
                 name, rarity, card_no, pack = parse_title(full_title)
 
-                key = f"{name}_{rarity}_{card_no}"
+                run_key = f"{name}_{rarity}_{card_no}"
 
-                if key in processed_in_this_run:
+                if run_key in processed_in_this_run:
                     continue
 
-                processed_in_this_run.add(key)
+                processed_in_this_run.add(run_key)
 
                 progress_bar.progress(
-                    (idx + 1) / len(matches)
+                    (idx + 1) / total_items
                 )
 
                 status_text.write(
-                    f"🔄 {name}"
+                    f"🔄 処理中 ({idx+1}/{total_items}) "
+                    f"{name}"
                 )
 
-                psa_price, real_url = get_psa10_data_from_page(
-                    page,
-                    access_url
+                psa_price, real_product_url = (
+                    get_psa10_data_from_page(
+                        page,
+                        access_url
+                    )
                 )
 
                 now_str = datetime.now(
@@ -621,76 +604,83 @@ if st.session_state.running:
                     pack,
                     psa_price,
                     now_str,
-                    real_url
+                    real_product_url
                 ]
 
-                if key in pokemon_map:
+                if run_key in pokemon_map:
 
-                    row_num = pokemon_map[key]
+                    row_num = pokemon_map[run_key]["row_num"]
 
-                    updates.append({
-                        "range": f"A{row_num}:G{row_num}",
-                        "values": [row_data]
-                    })
-
-                    st.toast(
-                        f"✏️ 更新: {name} / {psa_price}"
+                    sheet.update(
+                        f"A{row_num}:G{row_num}",
+                        [row_data]
                     )
+
+                    if psa_price != "なし":
+
+                        st.toast(
+                            f"✏️ 更新: {name} "
+                            f"¥{psa_price:,}"
+                        )
+
+                    else:
+
+                        st.toast(
+                            f"✏️ 更新: {name} "
+                            f"価格なし"
+                        )
 
                 else:
 
-                    append_rows.append(row_data)
+                    new_rows.append(row_data)
 
-                    st.toast(
-                        f"➕ 新規: {name} / {psa_price}"
-                    )
+                    current_total_rows += 1
+
+                    pokemon_map[run_key] = {
+                        "row_num": current_total_rows
+                    }
+
+                    if psa_price != "なし":
+
+                        st.toast(
+                            f"➕ 新規: {name} "
+                            f"¥{psa_price:,}"
+                        )
+
+                    else:
+
+                        st.toast(
+                            f"➕ 新規: {name} "
+                            f"価格なし"
+                        )
 
                 time.sleep(
-                    random.uniform(2.5, 4.5)
+                    random.uniform(2.5, 4.0)
                 )
 
             browser.close()
 
-        # batch update
-        if updates:
+        if new_rows and st.session_state.running:
 
-            body = {
-                "valueInputOption": "USER_ENTERED",
-                "data": updates
-            }
+            sheet.append_rows(new_rows)
 
-            sheet.batch_update(body)
+        if st.session_state.running:
 
-        # append
-        if append_rows:
+            st.session_state.current_page += 1
 
-            latest_rows = sheet.get_all_values()
+            time.sleep(3)
 
-            existing_keys = set()
+            st.rerun()
 
-            for row in latest_rows[1:]:
+        else:
 
-                while len(row) < 3:
-                    row.append("")
+            st.warning(
+                f"🛑 停止されました"
+            )
 
-                existing_keys.add(
-                    f"{row[0]}_{row[1]}_{row[2]}"
-                )
+            break
 
-            filtered = []
+    st.session_state.running = False
 
-            for row in append_rows:
-
-                k = f"{row[0]}_{row[1]}_{row[2]}"
-
-                if k not in existing_keys:
-                    filtered.append(row)
-
-            if filtered:
-                sheet.append_rows(filtered)
-
-        st.session_state.current_page += 1
-
-        time.sleep(3)
-
-        st.rerun()
+    st.rerun()
+```
