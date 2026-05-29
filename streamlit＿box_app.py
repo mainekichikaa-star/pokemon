@@ -78,17 +78,17 @@ def get_sheet():
         return sheet
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（カンマなしバグ完全対策版）
+# 価格＆開いたページのURL取得ロジック（パック・タイムアウト完全対策版）
 # =========================================
 
 def get_box_data_from_page(page, product_url):
-    """1個あたりの価格を算出して直近6件の中央値を返す（ロード待ち＋数字抽出を極限強化）"""
+    """パック・ボックス両対応、ロード待ちを極限まで強化して直近6件の中央値を計算"""
     target_median = "なし"
     final_url = product_url
 
     try:
         page.goto(product_url, wait_until="networkidle", timeout=45000)
-        time.sleep(1.0)
+        time.sleep(1.5)  # 基本の待機時間を少し延長して安定化
 
         final_url = page.url.split("/sales-histories")[0].split("?")[0]
 
@@ -101,11 +101,15 @@ def get_box_data_from_page(page, product_url):
                 if (modal) { modal.remove(); }
             }
         """)
-        time.sleep(0.3)
 
-        # 【対策1】非同期で読み込まれる売買履歴のリスト(li)が登場するまで最大15秒待つ
+        # 【強化1】売買履歴の親要素が表示され、かつ中身（テキスト）が読み込まれるまで最大20秒待つ
         try:
-            page.wait_for_selector("ul.sales-history.item-list li", timeout=15000)
+            page.wait_for_selector("ul.sales-history.item-list", state="attached", timeout=20000)
+            # 履歴の最初の子要素に文字が入るまで数秒追加待機
+            page.wait_for_function(
+                "() => document.querySelector('ul.sales-history.item-list li p.price') !== null",
+                timeout=5000
+            )
         except Exception:
             pass
 
@@ -115,15 +119,15 @@ def get_box_data_from_page(page, product_url):
         history_items = soup.select("ul.sales-history.item-list li")
 
         for item in history_items:
-            size_elem = item.select_one("p.size")    # 例: "2個" "10個"
-            price_elem = item.select_one("p.price")  # 例: "¥54,200" または カンマのない "¥30000"
+            size_elem = item.select_one("p.size")    # 「1個」「30パック」など
+            price_elem = item.select_one("p.price")  # 「¥30,000」「¥19200」など
 
             if size_elem and price_elem:
                 size_text = size_elem.get_text(strip=True)
                 price_text = price_elem.get_text(strip=True)
 
                 try:
-                    # 【対策2】文字列から純粋な「数字」だけを1文字ずつ抽出して結合（カンマ有無の影響を完全回避）
+                    # 【強化2】「個」でも「パック」でも、文字列に含まれるすべての「数字だけ」を抽出
                     clean_size = "".join([c for c in size_text if c.isdigit()])
                     clean_price = "".join([c for c in price_text if c.isdigit()])
                     
@@ -134,7 +138,7 @@ def get_box_data_from_page(page, product_url):
                     total_price = int(clean_price)
                     
                     if count > 0:
-                        # 1個あたりの価格を計算（端数切り捨て）
+                        # 1個（または1パック）あたりの価格を計算
                         unit_price = int(total_price / count)
                         unit_prices.append(unit_price)
                 except Exception:
@@ -156,7 +160,7 @@ def get_box_data_from_page(page, product_url):
 
 st.set_page_config(page_title="ポケカ（パック・ボックス）価格自動反映", layout="wide")
 st.title("📦 ポケカ価格自動反映ツール（パック・ボックス版）")
-st.write("ボックス・パックの一覧から、1個あたりの直近6件中央値価格を算出してシートへ同期します。")
+st.write("ボックス・パックの一覧から、1個（パック）あたりの直近6件中央値価格を算出してシートへ同期します。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
@@ -195,7 +199,6 @@ if st.session_state.running:
     st.info("📊 最新データを取得するため、Googleシートをスキャン中...")
     existing_rows = sheet.get_all_values()
     
-    # 現在のシート上のデータ件数を正確に把握
     current_total_rows = len(existing_rows)
     box_map = {}
 
@@ -203,7 +206,7 @@ if st.session_state.running:
         for idx, row in enumerate(existing_rows[1:], start=2):
             while len(row) < 4:
                 row.append("")
-            key = row[0].strip() # 「整形後の名前」をキーにして重複・更新チェック
+            key = row[0].strip()
             box_map[key] = {"row_num": idx}
 
     log_area = st.empty()
@@ -215,7 +218,6 @@ if st.session_state.running:
         current_page = st.session_state.current_page
         log_area.markdown(f"## 📄 現在、一覧の **ページ {current_page}** を解析中...")
         
-        # 指定されたボックス・パック用のURL
         url = (
             f"https://snkrdunk.com/search?"
             f"keywords=%E3%83%88%E3%83%AC%E3%82%AB"
@@ -252,13 +254,10 @@ if st.session_state.running:
             st.session_state.running = False
             break
 
-        # 1ページ最大30商品制限
         matches = matches[:30]
-
         new_rows = []
         total_items = len(matches)
 
-        # 1ページ分を一気に回すため、ブラウザをここで起動
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -277,11 +276,9 @@ if st.session_state.running:
 
                 href = match[0]
                 
-                # タイトルの不要な文字列「ポケモンカードゲーム」の削除と「&amp;」の置換処理
                 raw_name = match[1].strip()
                 name = raw_name.replace("ポケモンカードゲーム", "").replace("&amp;", "&").strip()
 
-                # 商品IDの抽出
                 id_match = re.search(r'/(?:products|apparels)/(?:used/)?(\d+)', href)
                 if not id_match:
                     continue
@@ -296,37 +293,32 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-                # 単価計算を含んだスクレイピング処理の実行
                 unit_median_price, real_product_url = get_box_data_from_page(page, access_url)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
                 row_data = [name, unit_median_price, now_str, real_product_url]
 
-                # Googleスプレッドシート重複・キャッシュチェック
                 if name in box_map:
                     row_num = box_map[name]["row_num"]
                     sheet.update(f"A{row_num}:D{row_num}", [row_data])
-                    st.toast(f"✏️ 【上書き更新】{name} -> 1個あたり ¥{unit_median_price}")
+                    st.toast(f"✏️ 【上書き更新】{name} -> 単価 ¥{unit_median_price}")
                 else:
-                    # 新規追加データをリストに追加
                     new_rows.append(row_data)
-                    st.toast(f"➕ 【新規追加】{name} -> 1個あたり ¥{unit_median_price}")
+                    st.toast(f"➕ 【新規追加】{name} -> 単価 ¥{unit_median_price}")
                     
-                    # キャッシュ位置ズレ対策
                     current_total_rows += 1
                     box_map[name] = {"row_num": current_total_rows}
 
-                time.sleep(random.uniform(2.5, 4.0))
+                time.sleep(random.uniform(3.0, 5.0)) # 負荷を考慮し、スクレイピング間隔をわずかに調整
 
-            browser.close() # 1ページ（30件）終わったらブラウザを安全に終了
+            browser.close()
 
-        # 新規取得データの一括挿入
         if new_rows and st.session_state.running:
             sheet.append_rows(new_rows)
 
         if st.session_state.running:
-            st.session_state.current_page += 1  # ページカウントを進める
-            time.sleep(3.5)
+            st.session_state.current_page += 1
+            time.sleep(4.0)
         else:
             st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
             break
