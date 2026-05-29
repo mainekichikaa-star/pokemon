@@ -78,7 +78,6 @@ def get_sheet():
         service_account_info["private_key"] = pk
 
     creds = ServiceAccountCredentials.from_json_keyfile_dict(service_account_info, scope)
-    # 【修正】authorizecreds になっていたタイポを authorize に修正
     client = gspread.authorize(creds)
     workbook = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -112,19 +111,28 @@ def parse_title(full_title):
     return name, rarity, card_no, pack
 
 # =========================================
-# 価格＆開いたページのURL取得ロジック（検証用スクショ付き）
+# 価格＆開いたページのURL取得ロジック（全履歴スクショ保存版）
 # =========================================
 
-def get_psa10_data_from_page(page, product_url, screenshot_area):
-    """他状態を無視してPSA10を狙い撃ち＋待機処理強化＋ページ確認用スクショ機能"""
+def get_psa10_data_from_page(page, product_url, card_name):
+    """他状態を無視してPSA10を狙い撃ち＋待機処理強化＋全スクショ履歴保存機能"""
     target_median = "なし"
     final_url = product_url.split("/sales-histories")[0].split("?")[0]
     history_url = f"{final_url}/sales-histories?slide=right"
+    
+    shot_before = None
+    shot_after = None
 
     try:
         # 相場専用ページへ移動
         page.goto(history_url, wait_until="networkidle", timeout=45000)
-        time.sleep(1.5)
+        time.sleep(1.0)
+
+        # 1回目の撮影（アクセス直後）
+        try:
+            shot_before = page.screenshot(full_page=False)
+        except:
+            pass
 
         # Buyeeポップアップの消去
         page.evaluate("""
@@ -143,9 +151,11 @@ def get_psa10_data_from_page(page, product_url, screenshot_area):
         except:
             pass
 
-        # 検証用のスクリーンショット撮影（メモリ上に保存してStreamlitに表示）
-        screenshot_bytes = page.screenshot(full_page=False)
-        screenshot_area.image(screenshot_bytes, caption=f"📸 現在のブラウザ目線: {history_url}", use_container_width=True)
+        # 2回目の撮影（待機・ポップアップ処理完了後）
+        try:
+            shot_after = page.screenshot(full_page=False)
+        except:
+            pass
 
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
@@ -181,25 +191,41 @@ def get_psa10_data_from_page(page, product_url, screenshot_area):
     except Exception as e:
         pass
 
+    # セッション状態にスクショ履歴を追加保存する
+    if "screenshot_history" not in st.session_state:
+        st.session_state.screenshot_history = []
+        
+    st.session_state.screenshot_history.append({
+        "name": card_name,
+        "url": history_url,
+        "price": target_median,
+        "shot_before": shot_before,
+        "shot_after": shot_after,
+        "time": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%H:%M:%S")
+    })
+
     return target_median, final_url
 
 # =========================================
 # Streamlit UI & 状態管理
 # =========================================
 
-st.set_page_config(page_title="ポケカ価格自動反映（スクショ検証版）", layout="wide")
-st.title("🃏 ポケカ価格自動反映ツール（スクショ検証機能付き）")
-st.write("本当に正しいページを開けているか、右側の目視確認用エリアに自動で撮影されたスクショが表示されます。")
+st.set_page_config(page_title="ポケカ価格自動反映（全スクショ記録版）", layout="wide")
+st.title("🃏 ポケカ価格自動反映ツール（全件スクショ履歴ログ保存版）")
+st.write("処理したすべてのカードのブラウザ画面を下にすべて残していきます。あとから「なし」の原因を完全に追跡可能です。")
 
 if "running" not in st.session_state:
     st.session_state.running = False
 if "current_page" not in st.session_state:
     st.session_state.current_page = 1
+if "screenshot_history" not in st.session_state:
+    st.session_state.screenshot_history = []
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     if st.button("🔄 最初から（1ページ目）更新を開始", type="primary", disabled=st.session_state.running):
+        st.session_state.screenshot_history = []  # 履歴をリセット
         st.session_state.current_page = 1
         st.session_state.running = True
         st.rerun()
@@ -215,19 +241,40 @@ with col3:
 
 if stop_button:
     st.session_state.running = False
-    st.warning("🛑 停止要請を受け付けました。現在のページの同期完了後に安全に停止します...")
+    st.warning("🛑 停止要付け。現在のページの同期完了後に安全に停止します...")
     st.rerun()
 
-# 左右に画面を2分割（左：ログ、右：実況スクショ）
-main_col, side_col = st.columns([2, 1])
+# 左右2分割（左：進捗・操作ログ、右：蓄積されるスクショ履歴）
+main_col, side_col = st.columns([1, 1])
 
 with main_col:
     log_area = st.empty()
     progress_bar = st.progress(0)
 
 with side_col:
-    st.write("### 📺 ブラウザのリアルタイム画面")
-    screenshot_area = st.empty()
+    st.write("### 📜 走査した全カードのブラウザ画面履歴")
+    # 過去のスクショを新しい順に並べてすべて表示させる領域
+    sc_container = st.container()
+    with sc_container:
+        if st.session_state.screenshot_history:
+            for item in reversed(st.session_state.screenshot_history):
+                st.markdown(f"---")
+                st.markdown(f"**【{item['time']}】 {item['name']}**")
+                st.markdown(f"結果価格: `¥{item['price']}`  |  [対象URL]({item['url']})")
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    if item['shot_before']:
+                        st.image(item['shot_before'], caption="📸 開いた直後", use_container_width=True)
+                    else:
+                        st.write("直後スクショ失敗")
+                with c2:
+                    if item['shot_after']:
+                        st.image(item['shot_after'], caption="📸 待機・ポップアップ処理後", use_container_width=True)
+                    else:
+                        st.write("待機後スクショ失敗")
+        else:
+            st.info("スタートすると、ここに全カードの処理画面履歴がたまっていきます。")
 
 # =========================================
 # メイン巡回ループ
@@ -328,7 +375,8 @@ if st.session_state.running:
                 progress_bar.progress((idx + 1) / total_items)
                 log_area.markdown(f"### 🔄 処理中({idx+1}/{total_items}件目): **{name}** (ページ {current_page})")
 
-                psa_price, real_product_url = get_psa10_data_from_page(page, access_url, screenshot_area)
+                # 進捗と同時に画面にスクショを蓄積保存する
+                psa_price, real_product_url = get_psa10_data_from_page(page, access_url, name)
                 
                 now_str = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
                 row_data = [name, rarity, card_no, pack, psa_price, now_str, real_product_url]
@@ -343,7 +391,8 @@ if st.session_state.running:
                     current_total_rows += 1
                     pokemon_map[run_key] = {"row_num": current_total_rows}
 
-                time.sleep(random.uniform(3.0, 5.0))
+                # 履歴を即座にUI側に再レンダリング反映させるためのトリック
+                st.rerun()
 
             browser.close()
 
@@ -353,6 +402,7 @@ if st.session_state.running:
         if st.session_state.running:
             st.session_state.current_page += 1
             time.sleep(3.5)
+            st.rerun()
         else:
             st.warning(f"🛑 ユーザーにより停止されました。（前回処理完了: {current_page} ページ目）")
             break
